@@ -525,7 +525,9 @@ export class Dashboard implements vscode.Disposable {
         ? '<div class="sub">' + S.thisPcTokens + ' ' + compact(tokenBucket.totalTokens) + ' · $' + money(tokenBucket.costUsd) + '</div>'
         : '';
       const projLine = proj
-        ? '<div class="sub">' + S.byTrend + ' ' + projText(proj) + '</div>'
+        ? (proj.reaches
+            ? '<div class="sub">' + S.byTrend + ' ' + projText(proj) + '</div>'
+            : '<div class="sub">' + S.noReachWindow + '</div>')
         : '';
       return card(title,
         '<div class="row"><div class="value">' + used + S.usedSuffix + '</div></div>' +
@@ -602,10 +604,11 @@ export class Dashboard implements vscode.Disposable {
       const token = state.tokenUsage?.tokenUsage;
       const account = state.account;
       const history = state.history || {};
+      const proj = state.projection || {};
       root.innerHTML = [
         card(S.account, accountHtml(account, state)),
-        limitCard(codexLimitTitle(limit.primary, S.fiveHourLimit), limit.primary, history.lastFiveHours),
-        limitCard(codexLimitTitle(limit.secondary, S.sevenDayLimitCodex), limit.secondary, history.lastSevenDays),
+        limitCard(codexLimitTitle(limit.primary, S.fiveHourLimit), limit.primary, history.lastFiveHours, proj.primary),
+        limitCard(codexLimitTitle(limit.secondary, S.sevenDayLimitCodex), limit.secondary, history.lastSevenDays, proj.secondary),
         card(S.sessionCard, codexSessionHtml(token, history, state)),
         card(S.codexHistTitle, codexHistorySummaryHtml(history, state), "wide"),
         card(S.codexModelTitle, codexModelHtml(history), "wide"),
@@ -635,7 +638,7 @@ export class Dashboard implements vscode.Disposable {
       if (mins >= 6 * 24 * 60) return S.sevenDayLimitCodex;
       return fallback;
     }
-    function limitCard(title, win, tokenBucket) {
+    function limitCard(title, win, tokenBucket, proj) {
       if (!win) return card(title, '<div class="value muted">' + S.noLimitInfo + '</div><div class="sub">' + S.noLimitSub + '</div>');
       const used = Number(win.usedPercent || 0);
       const cls = used >= 90 ? "danger" : used >= 70 ? "warn" : "";
@@ -646,10 +649,15 @@ export class Dashboard implements vscode.Disposable {
       const tokenLine = tokenBucket
         ? '<div class="sub">' + S.sameWindowLocal + ' ' + compact(tokenBucket.totalTokens) + ' ' + S.tokensUnit + '</div>'
         : '';
+      const projLine = proj
+        ? (proj.reaches
+            ? '<div class="sub">' + S.byTrend + ' ' + projText(proj) + '</div>'
+            : '<div class="sub">' + S.noReachWindow + '</div>')
+        : '';
       return card(title,
         '<div class="row"><div class="value">' + used + S.usedSuffix + '</div></div>' +
         '<div class="bar"><div class="fill ' + cls + '" style="width:' + clamp(used, 0, 100) + '%"></div></div>' +
-        '<div class="sub">' + escapeHtml(reset + duration) + '</div>' + tokenLine);
+        '<div class="sub">' + escapeHtml(reset + duration) + '</div>' + tokenLine + projLine);
     }
     function creditsHtml(limit) {
       const credits = limit.credits;
@@ -900,11 +908,11 @@ export function formatClaudeTooltip(state: ClaudeState): string {
     parts.push(`${T.weeklySonnet}: ${Math.round(plan.sevenDaySonnet.utilization)}%`);
   }
   const proj = state.projection;
-  if (proj?.fiveHour) {
-    parts.push(`${T.fiveHourEta}: ${formatHours(proj.fiveHour.hoursToFull)} ${T.after}`);
+  if (proj?.fiveHour?.reaches) {
+    parts.push(`${T.fiveHourEta}: ${formatHours(proj.fiveHour.hoursToFull ?? 0)} ${T.after}`);
   }
-  if (proj?.sevenDay) {
-    parts.push(`${T.sevenDayEta}: ${formatHours(proj.sevenDay.hoursToFull)} ${T.after}`);
+  if (proj?.sevenDay?.reaches) {
+    parts.push(`${T.sevenDayEta}: ${formatHours(proj.sevenDay.hoursToFull ?? 0)} ${T.after}`);
   }
   const tok = state.tokens;
   if (tok) {

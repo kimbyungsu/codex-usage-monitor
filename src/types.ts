@@ -106,6 +106,11 @@ export interface UsageState {
   requiresOpenaiAuth?: boolean;
   rateLimits?: RateLimitSnapshot | null;
   rateLimitsByLimitId?: Record<string, RateLimitSnapshot> | null;
+  /** 최근 사용률 추세로 추정한 한도 소진 예상(창 리셋 전 도달 시에만 reaches=true). Claude 방식과 동일. */
+  projection?: {
+    primary?: { reaches: boolean; hoursToFull?: number; etaMs?: number } | null;
+    secondary?: { reaches: boolean; hoursToFull?: number; etaMs?: number } | null;
+  } | null;
   tokenUsage?: TokenUsageNotification | null;
   history?: CodexHistoryUsage | null;
   lastRefresh?: number;

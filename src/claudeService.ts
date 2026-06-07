@@ -176,7 +176,7 @@ export class ClaudeService implements vscode.Disposable {
     if (result.usage) {
       const now = Date.now();
       this.recordSample(now, result.usage);
-      projection = this.computeProjection(now);
+      projection = this.computeProjection(now, result.usage);
       this.checkAlerts(result.usage);
     }
 
@@ -226,7 +226,10 @@ export class ClaudeService implements vscode.Disposable {
     this.planSamples = this.planSamples.filter((s) => s.ts >= cutoff).slice(-60);
   }
 
-  private computeProjection(now: number): ClaudeState["projection"] {
+  private computeProjection(
+    now: number,
+    usage: { fiveHour?: { resetsAt: string | null } | null; sevenDay?: { resetsAt: string | null } | null },
+  ): ClaudeState["projection"] {
     const s = this.planSamples;
     if (s.length < 2) {
       return null;
@@ -237,23 +240,30 @@ export class ClaudeService implements vscode.Disposable {
     if (dtHours < 0.05) {
       return null; // 표본 구간이 너무 짧으면 추정 보류
     }
-    const proj = (cur?: number, old?: number) => {
+    // 창이 리셋되기 전에 한도에 닿을 때만 reaches=true. 닿기 전에 리셋되면(또는 증가세 ~0)
+    // reaches=false → UI는 "이번 창 내 미도달"로 표시(5시간 창에 '2일 후 소진' 같은 모순 방지).
+    const proj = (cur?: number, old?: number, resetsAt?: string | null) => {
       if (typeof cur !== "number" || typeof old !== "number") {
-        return null;
+        return null; // 데이터 없음
       }
       const ratePerHour = (cur - old) / dtHours; // %/시간
       if (ratePerHour <= 0.05) {
-        return null; // 증가세가 거의 없으면 소진 예상 무의미
+        return { reaches: false }; // 증가세 거의 없음 → 이번 창 미도달
       }
       const hoursToFull = (100 - cur) / ratePerHour;
       if (!isFinite(hoursToFull) || hoursToFull < 0) {
-        return null;
+        return { reaches: false };
       }
-      return { hoursToFull, etaMs: now + hoursToFull * 3_600_000 };
+      const etaMs = now + hoursToFull * 3_600_000;
+      const resetMs = resetsAt ? Date.parse(resetsAt) : NaN;
+      if (isFinite(resetMs) && etaMs >= resetMs) {
+        return { reaches: false }; // 리셋이 먼저 → 이번 창에선 미도달
+      }
+      return { reaches: true, hoursToFull, etaMs };
     };
     return {
-      fiveHour: proj(newest.five, oldest.five),
-      sevenDay: proj(newest.seven, oldest.seven),
+      fiveHour: proj(newest.five, oldest.five, usage.fiveHour?.resetsAt),
+      sevenDay: proj(newest.seven, oldest.seven, usage.sevenDay?.resetsAt),
     };
   }
 

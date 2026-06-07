@@ -106,8 +106,8 @@ export interface ClaudeState {
   lastTokenRefresh?: number;
   /** 최근 사용률 추세로 추정한 한도 소진 예상. */
   projection?: {
-    fiveHour?: { hoursToFull: number; etaMs: number } | null;
-    sevenDay?: { hoursToFull: number; etaMs: number } | null;
+    fiveHour?: { reaches: boolean; hoursToFull?: number; etaMs?: number } | null;
+    sevenDay?: { reaches: boolean; hoursToFull?: number; etaMs?: number } | null;
   } | null;
   /** 플랜 한도 API 관련 *실제* 오류(토큰 만료·인증서 등) — 알림 카드로 표시. */
   planError?: string;

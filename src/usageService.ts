@@ -22,6 +22,8 @@ export class UsageService implements vscode.Disposable {
   private serverBaseMs = 60_000;
   private serverIntervalMs = 60_000;
   private serverFailureCount = 0;
+  /** rate-limit 사용률 추세 추정용 샘플 버퍼 (Claude planSamples와 동일 개념). */
+  private rlSamples: Array<{ ts: number; primary?: number; secondary?: number }> = [];
   private readonly onDidChangeEmitter = new vscode.EventEmitter<UsageState>();
   private state: UsageState = {
     connected: false,
@@ -87,12 +89,15 @@ export class UsageService implements vscode.Disposable {
 
       this.serverFailureCount = 0;
       this.serverIntervalMs = this.serverBaseMs;
+      const sampledAt = Date.now();
+      this.recordRlSample(sampledAt, limits.rateLimits);
       this.setState({
         account: account.account,
         requiresOpenaiAuth: account.requiresOpenaiAuth,
         rateLimits: limits.rateLimits,
         rateLimitsByLimitId: limits.rateLimitsByLimitId,
-        lastRefresh: Date.now(),
+        projection: this.computeProjection(sampledAt, limits.rateLimits),
+        lastRefresh: sampledAt,
         connected: true,
         connecting: false,
         error: undefined,
@@ -218,6 +223,59 @@ export class UsageService implements vscode.Disposable {
     } catch (error) {
       return { error: (error as Error).message };
     }
+  }
+
+  /** 사용률 추세 샘플 기록(리셋으로 급락 시 버퍼 초기화). Claude recordSample와 동일 개념. */
+  private recordRlSample(now: number, rl?: RateLimitSnapshot | null): void {
+    if (!rl) {
+      return;
+    }
+    const primary = rl.primary?.usedPercent;
+    const secondary = rl.secondary?.usedPercent;
+    const last = this.rlSamples[this.rlSamples.length - 1];
+    if (last && typeof primary === "number" && typeof last.primary === "number" && primary < last.primary - 5) {
+      this.rlSamples = []; // 사용률 급락 = 윈도우 리셋 → 이전 추세 폐기
+    }
+    this.rlSamples.push({ ts: now, primary, secondary });
+    const cutoff = now - 2 * 60 * 60 * 1000;
+    this.rlSamples = this.rlSamples.filter((s) => s.ts >= cutoff).slice(-60);
+  }
+
+  /** 창 리셋 전 한도 도달 시에만 reaches=true (5시간 창에 '2일 후 소진' 같은 모순 방지). */
+  private computeProjection(now: number, rl?: RateLimitSnapshot | null): UsageState["projection"] {
+    const s = this.rlSamples;
+    if (!rl || s.length < 2) {
+      return null;
+    }
+    const newest = s[s.length - 1];
+    const oldest = s[0];
+    const dtHours = (newest.ts - oldest.ts) / 3_600_000;
+    if (dtHours < 0.05) {
+      return null;
+    }
+    const proj = (cur?: number, old?: number, resetsAtSec?: number | null) => {
+      if (typeof cur !== "number" || typeof old !== "number") {
+        return null;
+      }
+      const ratePerHour = (cur - old) / dtHours;
+      if (ratePerHour <= 0.05) {
+        return { reaches: false };
+      }
+      const hoursToFull = (100 - cur) / ratePerHour;
+      if (!isFinite(hoursToFull) || hoursToFull < 0) {
+        return { reaches: false };
+      }
+      const etaMs = now + hoursToFull * 3_600_000;
+      const resetMs = typeof resetsAtSec === "number" ? resetsAtSec * 1000 : NaN;
+      if (isFinite(resetMs) && etaMs >= resetMs) {
+        return { reaches: false }; // 리셋이 먼저 → 이번 창 미도달
+      }
+      return { reaches: true, hoursToFull, etaMs };
+    };
+    return {
+      primary: proj(newest.primary, oldest.primary, rl.primary?.resetsAt),
+      secondary: proj(newest.secondary, oldest.secondary, rl.secondary?.resetsAt),
+    };
   }
 
   private setState(patch: Partial<UsageState>): void {
