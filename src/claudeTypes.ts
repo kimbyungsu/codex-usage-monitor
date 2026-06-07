@@ -43,6 +43,26 @@ export interface TokenBucket {
   messages: number;
 }
 
+/** 트랜스크립트 파일(=세션/스레드) 단위 사용량 요약. Codex recentThreads와 대칭. */
+export interface ClaudeThreadUsage {
+  /** 세션 ID(트랜스크립트의 sessionId 또는 파일명). */
+  threadId: string;
+  /** 표시용 제목(프로젝트 cwd 등). */
+  title?: string;
+  /** 트랜스크립트 파일 경로. */
+  path: string;
+  /** 마지막 활동 시각(ms). */
+  updatedAt: number;
+  /** 이 스레드의 주 모델. */
+  model?: string;
+  /** 파일 전체 누적. */
+  total: TokenBucket;
+  /** 최근 7일 분만. */
+  lastSevenDays: TokenBucket;
+  /** 최근 7일 어시스턴트 메시지 수. */
+  events: number;
+}
+
 /** JSONL에서 집계한 토큰/비용 묶음들. */
 export interface ClaudeTokenUsage {
   total: TokenBucket;
@@ -57,6 +77,8 @@ export interface ClaudeTokenUsage {
   contextTokens: number;
   /** 현재 세션의 주 모델. */
   sessionModel?: string;
+  /** 최근 스레드 목록(이 PC · 최근 7일). 최근 활동순 상위 8개. */
+  recentThreads: ClaudeThreadUsage[];
   /** 모델별 합계. 전체 기간 로스터를 유지하되 최근 7일 값도 함께 제공. */
   byModel: Array<{
     model: string;

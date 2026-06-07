@@ -107,9 +107,10 @@ export class UsageService implements vscode.Disposable {
 
   private async refreshLocal(): Promise<void> {
     const now = Date.now();
+    const extraSessionPaths = this.config().get<string[]>("codexExtraSessionPaths", []) || [];
     const [extraUsage, history] = await Promise.all([
       this.readExtraUsageCommand(),
-      Promise.resolve(readCodexHistory()),
+      Promise.resolve(readCodexHistory(undefined, extraSessionPaths)),
     ]);
 
     const hasPreviousHistory = Boolean(this.state.history && !this.state.history.error);

@@ -129,6 +129,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (event.affectsConfiguration("codexUsageMonitor.extraUsageCommand")) {
         void service.refresh();
       }
+      if (event.affectsConfiguration("codexUsageMonitor.codexExtraSessionPaths")) {
+        void service.refresh();
+      }
       if (event.affectsConfiguration("codexUsageMonitor.showClaudeStatusBar")) {
         renderClaudeStatusBar();
       }

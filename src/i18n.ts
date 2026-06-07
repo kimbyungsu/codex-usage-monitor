@@ -57,6 +57,7 @@ interface TsStrings {
   pathAdded: (p: string) => string;
   pickFolderLabel: string;
   pickFolderTitle: string;
+  codexPickFolderTitle: string;
   // 카운트다운/시간
   soon: string;
   unknown: string;
@@ -107,6 +108,7 @@ const KO: TsStrings = {
   pathAdded: (p) => `합산 경로 추가됨: ${p}`,
   pickFolderLabel: "이 폴더를 합산에 추가",
   pickFolderTitle: "다른 환경의 .claude 또는 projects 폴더 선택",
+  codexPickFolderTitle: "다른 환경의 .codex 또는 sessions 폴더 선택",
   soon: "곧",
   unknown: "미상",
   dh: (d, h) => `${d}일 ${h}시간`,
@@ -156,6 +158,7 @@ const EN: TsStrings = {
   pathAdded: (p) => `Merge path added: ${p}`,
   pickFolderLabel: "Add this folder to merge",
   pickFolderTitle: "Pick another environment's .claude or projects folder",
+  codexPickFolderTitle: "Pick another environment's .codex or sessions folder",
   soon: "soon",
   unknown: "unknown",
   dh: (d, h) => `${d}d ${h}h`,
@@ -260,6 +263,12 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     codexHistTitle: "최근 7일 로컬 토큰",
     codexModelTitle: "모델별 사용량 (이 PC · 최근 7일)",
     codexThreadsTitle: "최근 스레드 (이 PC · 최근 7일)",
+    codexMergeTitle: "다른 환경 합치기",
+    codexMergeAuto: "같은 PC·같은 계정이면 CLI·IDE·여러 세션이 <b>전부 자동 합산</b>됩니다 — 따로 할 것 없음.",
+    codexMergeWhen: "다른 Windows 계정 · WSL · 다른 드라이브/PC처럼 <b>.codex 폴더가 따로</b> 있을 때만, 그 환경의 폴더를 아래에서 추가하세요.",
+    codexBrowse: "📁 폴더 선택해서 추가",
+    codexPathPlaceholder: "또는 경로 직접 입력 (예: \\\\wsl$\\Ubuntu\\home\\계정\\.codex\\sessions)",
+    codexNoPaths: "추가된 경로 없음 — 이 PC만 집계 중",
     noLocalHistory: "로컬 기록 없음",
     codexLogNotRead: "Codex 로그를 아직 읽지 못했습니다.",
     codexHistNote: "한도(%·리셋)는 계정 전체(서버), 토큰·모델은 이 PC 로컬 기준입니다. 7일 미사용 모델은 자동 제외됩니다. Codex 모델별 비용은 안정적인 자동 매칭을 보장할 수 없어 표시하지 않습니다.",
@@ -380,6 +389,12 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     codexHistTitle: "Last 7d local tokens",
     codexModelTitle: "By model (this PC · last 7d)",
     codexThreadsTitle: "Recent threads (this PC · last 7d)",
+    codexMergeTitle: "Merge other environments",
+    codexMergeAuto: "On the same PC and account, CLI · IDE · multiple sessions are <b>all merged automatically</b> — nothing to do.",
+    codexMergeWhen: "Only when a <b>separate .codex folder</b> exists (other Windows account · WSL · another drive/PC), add that environment's folder below.",
+    codexBrowse: "📁 Pick a folder to add",
+    codexPathPlaceholder: "or type a path (e.g. \\\\wsl$\\Ubuntu\\home\\you\\.codex\\sessions)",
+    codexNoPaths: "No paths added — counting this PC only",
     noLocalHistory: "No local history",
     codexLogNotRead: "Codex logs not read yet.",
     codexHistNote: "Limits (%/reset) are account-wide (server); tokens/models are this PC's local logs. Models unused in 7d are auto-excluded. Codex model costs are not shown because stable automatic matching cannot be guaranteed.",

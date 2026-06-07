@@ -5,9 +5,10 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { StringDecoder } from "string_decoder";
 import * as vscode from "vscode";
 import { fetchPlanUsage, projectsDir, readCredentials, resolveConfigDir } from "./claudeApi";
-import { ClaudeState, ClaudeTokenUsage, TokenBucket } from "./claudeTypes";
+import { ClaudeState, ClaudeThreadUsage, ClaudeTokenUsage, TokenBucket } from "./claudeTypes";
 import { t } from "./i18n";
 
 // 모델별 100만 토큰당 단가(USD). 구독 사용자는 실제 청구가 아니라 'API 환산 비용'.
@@ -46,6 +47,12 @@ interface FileCache {
   mtimeMs: number;
   size: number;
   entries: UsageEntry[];
+  cwd?: string;
+  sessionId?: string;
+  /** 증분 파싱용: 지금까지 읽은 바이트 오프셋. */
+  parsedBytes: number;
+  /** 증분 파싱용: 개행이 아직 안 온 마지막 미완성 라인. */
+  tailLeftover: string;
 }
 
 function emptyBucket(): TokenBucket {
@@ -405,11 +412,31 @@ export class ClaudeService implements vscode.Disposable {
       if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
         continue;
       }
-      this.fileCaches.set(file, {
-        mtimeMs: stat.mtimeMs,
-        size: stat.size,
-        entries: this.parseFile(file),
-      });
+      if (cached && stat.size > cached.size && cached.parsedBytes <= stat.size) {
+        // 파일이 늘어난 append 케이스: 새로 추가된 꼬리만 파싱해 이어붙인다(대용량 세션 성능).
+        const delta = this.parseFileRange(file, cached.parsedBytes, cached.tailLeftover);
+        this.fileCaches.set(file, {
+          mtimeMs: stat.mtimeMs,
+          size: stat.size,
+          entries: cached.entries.concat(delta.entries),
+          cwd: delta.cwd || cached.cwd,
+          sessionId: cached.sessionId || delta.sessionId,
+          parsedBytes: delta.parsedBytes,
+          tailLeftover: delta.tailLeftover,
+        });
+      } else {
+        // 신규/재작성(크기 축소 등): 전체를 스트리밍으로 파싱(>512MB도 안전).
+        const parsed = this.parseFileRange(file, 0, "");
+        this.fileCaches.set(file, {
+          mtimeMs: stat.mtimeMs,
+          size: stat.size,
+          entries: parsed.entries,
+          cwd: parsed.cwd,
+          sessionId: parsed.sessionId,
+          parsedBytes: parsed.parsedBytes,
+          tailLeftover: parsed.tailLeftover,
+        });
+      }
     }
     // 사라진 파일 캐시 정리.
     for (const key of [...this.fileCaches.keys()]) {
@@ -505,6 +532,49 @@ export class ClaudeService implements vscode.Disposable {
       }
     }
 
+    // 스레드(=트랜스크립트 파일)별 최근 7일 요약 — Codex recentThreads와 대칭.
+    const threads: ClaudeThreadUsage[] = [];
+    for (const [filePath, cache] of this.fileCaches.entries()) {
+      const tTotal = emptyBucket();
+      const tWeek = emptyBucket();
+      let tModel: string | undefined;
+      let updatedAt = cache.mtimeMs;
+      const tSeen = new Set<string>();
+      for (const e of cache.entries) {
+        if (e.key && tSeen.has(e.key)) {
+          continue;
+        }
+        if (e.key) {
+          tSeen.add(e.key);
+        }
+        addEntry(tTotal, e);
+        if (e.ts > updatedAt) {
+          updatedAt = e.ts;
+        }
+        if (e.model) {
+          tModel = e.model;
+        }
+        if (e.ts >= sevenDaysAgo) {
+          addEntry(tWeek, e);
+        }
+      }
+      if (tWeek.totalTokens <= 0) {
+        continue; // 최근 7일 사용분이 있는 스레드만 노출
+      }
+      threads.push({
+        threadId: cache.sessionId || path.basename(filePath, ".jsonl"),
+        title: cache.cwd ? path.basename(cache.cwd) : path.basename(path.dirname(filePath)),
+        path: filePath,
+        updatedAt,
+        model: tModel,
+        total: tTotal,
+        lastSevenDays: tWeek,
+        events: tWeek.messages,
+      });
+    }
+    threads.sort((a, b) => b.updatedAt - a.updatedAt);
+    const recentThreads = threads.slice(0, 8);
+
     return {
       total,
       today,
@@ -513,34 +583,49 @@ export class ClaudeService implements vscode.Disposable {
       session,
       contextTokens,
       sessionModel,
+      recentThreads,
       byModel: [...byModel.entries()]
         .map(([model, v]) => ({ model, ...v }))
         .sort((a, b) => b.totalTokens - a.totalTokens),
     };
   }
 
-  private parseFile(file: string): UsageEntry[] {
+  /**
+   * 트랜스크립트를 startOffset 바이트부터 청크 스트리밍으로 파싱한다.
+   * - fs.readFileSync 는 ~512MB(Node 최대 문자열) 초과 파일에서 ERR_STRING_TOO_LONG 으로 던진다.
+   *   Claude 세션 jsonl 은 수백 MB~GB 까지 커지므로(예: 597MB) 반드시 스트리밍으로 읽어야 한다.
+   * - StringDecoder 로 청크 경계의 멀티바이트(한글 등) 분할을 안전 처리.
+   * - startOffset>0 이면 증분(append) 파싱: 직전 미완성 라인(initialLeftover)을 이어붙인다.
+   * - 마지막 개행 없는 꼬리는 파싱하지 않고 tailLeftover 로 넘겨 다음 append 때 완성시킨다.
+   */
+  private parseFileRange(
+    file: string,
+    startOffset: number,
+    initialLeftover: string,
+  ): { entries: UsageEntry[]; cwd?: string; sessionId?: string; parsedBytes: number; tailLeftover: string } {
     const entries: UsageEntry[] = [];
-    let content: string;
-    try {
-      content = fs.readFileSync(file, "utf8");
-    } catch {
-      return entries;
-    }
-    for (const line of content.split("\n")) {
+    let cwd: string | undefined;
+    let sessionId: string | undefined;
+    let parsedBytes = startOffset;
+    let leftover = initialLeftover;
+
+    const handleLine = (line: string): void => {
       const trimmed = line.trim();
       if (!trimmed || trimmed[0] !== "{") {
-        continue;
+        return;
       }
       let obj: any;
       try {
         obj = JSON.parse(trimmed);
       } catch {
-        continue;
+        return;
       }
+      // 파일 레벨 메타(스레드 식별·제목용)는 usage 유무와 무관하게 가능한 한 채운다.
+      if (typeof obj.cwd === "string" && obj.cwd) cwd = obj.cwd;
+      if (typeof obj.sessionId === "string" && obj.sessionId) sessionId = obj.sessionId;
       const usage = obj?.message?.usage;
       if (!usage) {
-        continue;
+        return;
       }
       const model = String(obj.message.model ?? "unknown");
       const ts = obj.timestamp ? Date.parse(obj.timestamp) : 0;
@@ -558,8 +643,43 @@ export class ClaudeService implements vscode.Disposable {
         cost: entryCost(model, usage),
         key: msgId || reqId ? `${msgId}:${reqId}` : "",
       });
+    };
+
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(file, "r");
+      const CHUNK = 4 * 1024 * 1024;
+      const buf = Buffer.allocUnsafe(CHUNK);
+      const decoder = new StringDecoder("utf8");
+      let pos = startOffset;
+      for (;;) {
+        const bytes = fs.readSync(fd, buf, 0, CHUNK, pos);
+        if (bytes <= 0) {
+          break;
+        }
+        pos += bytes;
+        parsedBytes = pos;
+        leftover += decoder.write(buf.subarray(0, bytes));
+        let nl: number;
+        while ((nl = leftover.indexOf("\n")) >= 0) {
+          handleLine(leftover.slice(0, nl));
+          leftover = leftover.slice(nl + 1);
+        }
+      }
+      leftover += decoder.end();
+    } catch {
+      /* 읽기 실패 시 지금까지 파싱한 결과만 반환 */
+    } finally {
+      if (fd !== undefined) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          /* ignore */
+        }
+      }
     }
-    return entries;
+
+    return { entries, cwd, sessionId, parsedBytes, tailLeftover: leftover };
   }
 
   private listTranscripts(dir: string): string[] {

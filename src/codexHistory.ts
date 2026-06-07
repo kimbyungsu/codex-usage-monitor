@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { StringDecoder } from "string_decoder";
 import {
   CodexHistoryUsage,
   CodexModelUsage,
@@ -26,15 +27,48 @@ interface FileSummary {
   events: ParsedEvent[];
 }
 
-export function readCodexHistory(codexHome = defaultCodexHome()): CodexHistoryUsage {
-  const sessionsDir = path.join(codexHome, "sessions");
-  if (!fs.existsSync(sessionsDir)) {
-    return emptyHistory(`Codex sessions folder not found: ${sessionsDir}`);
+export function readCodexHistory(
+  codexHome = defaultCodexHome(),
+  extraSessionPaths: string[] = [],
+): CodexHistoryUsage {
+  // 집계 대상 sessions 폴더 목록 = 기본 ~/.codex/sessions + 사용자가 추가한 다른 환경 경로들.
+  const sessionDirs: string[] = [];
+  const addDir = (d: string): void => {
+    if (d && !sessionDirs.includes(d)) {
+      sessionDirs.push(d);
+    }
+  };
+  addDir(path.join(codexHome, "sessions"));
+  for (const raw of extraSessionPaths) {
+    const p = (raw ?? "").trim();
+    if (!p) {
+      continue;
+    }
+    // .codex 홈을 고르면 그 안 sessions 로 자동 보정, 이미 sessions 폴더면 그대로 사용.
+    const withSessions = path.join(p, "sessions");
+    addDir(fs.existsSync(withSessions) ? withSessions : p);
   }
 
-  const files = listRolloutFiles(sessionsDir);
+  const existingDirs = sessionDirs.filter((d) => fs.existsSync(d));
+  if (!existingDirs.length) {
+    return emptyHistory(`Codex sessions folder not found: ${sessionDirs.join(", ")}`);
+  }
+
+  // 겹치는 루트 간 동일 rollout 파일은 절대경로 기준으로 중복 제거(이중집계 방지).
+  const seenFiles = new Set<string>();
+  const files: string[] = [];
+  for (const dir of existingDirs) {
+    for (const f of listRolloutFiles(dir)) {
+      const key = path.resolve(f);
+      if (seenFiles.has(key)) {
+        continue;
+      }
+      seenFiles.add(key);
+      files.push(f);
+    }
+  }
   if (!files.length) {
-    return emptyHistory(`No Codex rollout files found: ${sessionsDir}`);
+    return emptyHistory(`No Codex rollout files found: ${existingDirs.join(", ")}`);
   }
 
   const now = Date.now();
@@ -217,30 +251,15 @@ function parseRolloutFile(file: string): FileSummary {
   let latestTotal = emptyBreakdown();
   let latestContextWindow: number | null | undefined;
 
-  let content = "";
-  try {
-    content = fs.readFileSync(file, "utf8");
-  } catch {
-    return {
-      threadId,
-      title,
-      path: file,
-      updatedAt,
-      latestModel,
-      latestTotal,
-      latestContextWindow,
-      events,
-    };
-  }
-
-  for (const line of content.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed[0] !== "{") continue;
+  // 한 줄 처리(상태 누적). 순서 보존이 중요하므로 스트리밍에서도 줄 순서대로 호출한다.
+  const handleLine = (raw: string): void => {
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed[0] !== "{") return;
     let obj: any;
     try {
       obj = JSON.parse(trimmed);
     } catch {
-      continue;
+      return;
     }
 
     const ts = obj.timestamp ? Date.parse(obj.timestamp) : 0;
@@ -251,7 +270,7 @@ function parseRolloutFile(file: string): FileSummary {
       title = obj.payload?.thread_name || obj.payload?.title || title;
       const metaModel = obj.payload?.model || obj.payload?.settings?.model;
       if (metaModel) latestModel = String(metaModel);
-      continue;
+      return;
     }
 
     if (obj.type === "turn_context") {
@@ -261,16 +280,16 @@ function parseRolloutFile(file: string): FileSummary {
         turnModels.set(String(turnId), String(model));
         latestModel = String(model);
       }
-      continue;
+      return;
     }
 
     if (obj.payload?.type === "task_started") {
       currentTurnId = obj.payload.turn_id ? String(obj.payload.turn_id) : currentTurnId;
-      continue;
+      return;
     }
 
     if (obj.payload?.type !== "token_count") {
-      continue;
+      return;
     }
 
     const info = obj.payload.info ?? {};
@@ -283,6 +302,45 @@ function parseRolloutFile(file: string): FileSummary {
       model: model || latestModel || "unknown",
       usage: last,
     });
+  };
+
+  // 청크 스트리밍 읽기: fs.readFileSync 는 ~512MB(Node 최대 문자열) 초과 시 ERR_STRING_TOO_LONG 으로
+  // 던지므로 대용량 rollout 이 통째로 누락된다. StringDecoder 로 멀티바이트 경계도 안전 처리.
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(file, "r");
+    const CHUNK = 4 * 1024 * 1024;
+    const buf = Buffer.allocUnsafe(CHUNK);
+    const decoder = new StringDecoder("utf8");
+    let leftover = "";
+    let pos = 0;
+    for (;;) {
+      const bytes = fs.readSync(fd, buf, 0, CHUNK, pos);
+      if (bytes <= 0) {
+        break;
+      }
+      pos += bytes;
+      leftover += decoder.write(buf.subarray(0, bytes));
+      let nl: number;
+      while ((nl = leftover.indexOf("\n")) >= 0) {
+        handleLine(leftover.slice(0, nl));
+        leftover = leftover.slice(nl + 1);
+      }
+    }
+    leftover += decoder.end();
+    if (leftover) {
+      handleLine(leftover);
+    }
+  } catch {
+    /* 읽기 실패 시 지금까지 파싱한 결과만 반환 */
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   return {

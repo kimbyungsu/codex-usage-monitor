@@ -63,6 +63,15 @@ export class Dashboard implements vscode.Disposable {
       if (message?.type === "browseClaudePath") {
         void this.browseExtraPath();
       }
+      if (message?.type === "addCodexPath" && message.path) {
+        void this.addCodexExtraPath(String(message.path));
+      }
+      if (message?.type === "removeCodexPath" && message.path) {
+        void this.removeCodexExtraPath(String(message.path));
+      }
+      if (message?.type === "browseCodexPath") {
+        void this.browseCodexExtraPath();
+      }
     });
     this.panel.onDidDispose(() => {
       this.panel = undefined;
@@ -83,6 +92,7 @@ export class Dashboard implements vscode.Disposable {
       state: this.service.currentState,
       claude: this.claude.currentState,
       extraPaths: this.getExtraPaths(),
+      codexExtraPaths: this.getCodexExtraPaths(),
     });
   }
 
@@ -144,6 +154,70 @@ export class Dashboard implements vscode.Disposable {
     });
     if (picked && picked[0]) {
       await this.addExtraPath(picked[0].fsPath);
+    }
+  }
+
+  // ---- Codex 합산 경로 (Claude 쪽과 대칭) ----
+
+  private getCodexExtraPaths(): string[] {
+    return (
+      vscode.workspace
+        .getConfiguration("codexUsageMonitor")
+        .get<string[]>("codexExtraSessionPaths", []) || []
+    );
+  }
+
+  private async setCodexExtraPaths(paths: string[]): Promise<void> {
+    await vscode.workspace
+      .getConfiguration("codexUsageMonitor")
+      .update("codexExtraSessionPaths", paths, vscode.ConfigurationTarget.Global);
+    void this.service.refresh();
+    this.postState();
+  }
+
+  private async addCodexExtraPath(input: string): Promise<void> {
+    const T = t();
+    let target = input.trim();
+    if (!target) {
+      return;
+    }
+    // 사용자가 .codex 폴더를 고르면 그 안의 sessions 하위로 자동 보정.
+    try {
+      if (fs.existsSync(target)) {
+        const sessionsChild = nodePath.join(target, "sessions");
+        if (nodePath.basename(target).toLowerCase() === ".codex" && fs.existsSync(sessionsChild)) {
+          target = sessionsChild;
+        }
+      } else {
+        vscode.window.showWarningMessage(T.pathNotExist(target));
+      }
+    } catch {
+      /* ignore */
+    }
+    const list = this.getCodexExtraPaths();
+    if (list.includes(target)) {
+      vscode.window.showInformationMessage(T.pathAlready);
+      return;
+    }
+    await this.setCodexExtraPaths([...list, target]);
+    vscode.window.showInformationMessage(T.pathAdded(target));
+  }
+
+  private async removeCodexExtraPath(target: string): Promise<void> {
+    await this.setCodexExtraPaths(this.getCodexExtraPaths().filter((p) => p !== target));
+  }
+
+  private async browseCodexExtraPath(): Promise<void> {
+    const T = t();
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFolders: true,
+      canSelectFiles: false,
+      canSelectMany: false,
+      openLabel: T.pickFolderLabel,
+      title: T.codexPickFolderTitle,
+    });
+    if (picked && picked[0]) {
+      await this.addCodexExtraPath(picked[0].fsPath);
     }
   }
 
@@ -283,6 +357,18 @@ export class Dashboard implements vscode.Disposable {
         <h2>Codex</h2>
         <div class="muted" style="margin:-4px 0 10px;font-size:12px">${S.codexScopeNote}</div>
         <section id="root" class="grid"></section>
+
+        <section class="card wide" style="margin-top:12px">
+          <div class="label">${S.codexMergeTitle}</div>
+          <div style="font-size:13px">${S.codexMergeAuto}</div>
+          <div class="muted" style="font-size:12px;margin:4px 0 10px">${S.codexMergeWhen}</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button id="browseCodexPath">${S.codexBrowse}</button>
+            <input id="codexPathInput" type="text" placeholder="${S.codexPathPlaceholder}" style="flex:1;min-width:240px;padding:6px 8px;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--border);border-radius:4px;font:inherit">
+            <button id="addCodexPath">${S.add}</button>
+          </div>
+          <ul id="codexPathList" style="list-style:none;padding:0;margin:10px 0 0"></ul>
+        </section>
       </section>
     </div>
   </main>
@@ -325,6 +411,32 @@ export class Dashboard implements vscode.Disposable {
       ).join("");
     }
 
+    // --- Codex 다른 환경 합치기 (Claude 쪽과 대칭) ---
+    const codexPathInput = document.getElementById("codexPathInput");
+    const codexPathList = document.getElementById("codexPathList");
+    document.getElementById("browseCodexPath").addEventListener("click", () => vscode.postMessage({ type: "browseCodexPath" }));
+    function submitCodexPath() {
+      const v = (codexPathInput.value || "").trim();
+      if (v) { vscode.postMessage({ type: "addCodexPath", path: v }); codexPathInput.value = ""; }
+    }
+    document.getElementById("addCodexPath").addEventListener("click", submitCodexPath);
+    codexPathInput.addEventListener("keydown", e => { if (e.key === "Enter") submitCodexPath(); });
+    codexPathList.addEventListener("click", e => {
+      const btn = e.target.closest("[data-remove]");
+      if (btn) vscode.postMessage({ type: "removeCodexPath", path: btn.getAttribute("data-remove") });
+    });
+    function renderCodexPaths(list) {
+      if (!list || !list.length) {
+        codexPathList.innerHTML = '<li class="muted" style="font-size:12px">' + S.codexNoPaths + '</li>';
+        return;
+      }
+      codexPathList.innerHTML = list.map(p =>
+        '<li style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;margin-bottom:6px">' +
+        '<span style="word-break:break-all;font-size:12px">' + escapeHtml(p) + '</span>' +
+        '<button class="secondary" data-remove="' + escapeHtml(p) + '">' + S.remove + '</button></li>'
+      ).join("");
+    }
+
     window.addEventListener("message", event => {
       if (event.data?.type === "state") {
         const codexState = event.data.state || {};
@@ -333,6 +445,7 @@ export class Dashboard implements vscode.Disposable {
         renderCodex(codexState);
         renderClaude(claudeState);
         renderPaths(event.data.extraPaths || []);
+        renderCodexPaths(event.data.codexExtraPaths || []);
       }
     });
 
@@ -392,6 +505,7 @@ export class Dashboard implements vscode.Disposable {
       cards.push(card(S.local7dCard, claudeLocalTokensHtml(tok, s), "wide"));
       cards.push(card(S.costCard, costHtml(tok)));
       cards.push(card(S.byModelCard, byModelHtml(tok), "wide"));
+      cards.push(card(S.codexThreadsTitle, claudeThreadsHtml(tok), "wide"));
       if (s.planError) cards.push(card(S.planAlert, '<div class="error">' + escapeHtml(s.planError) + '</div>', "wide"));
       if (s.tokenError) cards.push(card(S.tokenAlert, '<div class="error">' + escapeHtml(s.tokenError) + '</div>', "wide"));
       if (!s.available && !s.planError && !s.tokenError) {
@@ -469,6 +583,16 @@ export class Dashboard implements vscode.Disposable {
       return '<div class="sub">' + S.byModelNote + '</div>' +
         '<table><thead><tr><th>' + S.model + '</th><th>' + S.col7dTokens + '</th><th>' + S.col7dCost + '</th><th>' + S.colInput + '</th><th>' + S.colCache + '</th><th>' + S.colOutput + '</th></tr></thead><tbody>' +
         list.map(m => '<tr><td>' + escapeHtml(m.model) + '</td><td>' + compact(m.weekTokens) + '</td><td>$' + money(m.weekCostUsd) + '</td><td>' + compact(m.weekInputTokens) + '</td><td>' + compact(m.weekCacheTokens) + '</td><td>' + compact(m.weekOutputTokens) + '</td></tr>').join('') +
+        '</tbody></table>';
+    }
+
+    // Claude 최근 스레드(이 PC · 최근 7일) — Codex codexThreadsHtml 와 대칭.
+    function claudeThreadsHtml(tok) {
+      const list = (tok.recentThreads || []).slice(0, 8);
+      if (!list.length) return '<div class="value muted">' + S.no7dThreads + '</div>';
+      return '<div class="sub">' + S.threadsNote + '</div>' +
+        '<table><thead><tr><th>' + S.colThread + '</th><th>' + S.col7dTokens + '</th><th>' + S.colModel + '</th><th>' + S.colEvents + '</th><th>' + S.colUpdated + '</th></tr></thead><tbody>' +
+        list.map(t => '<tr><td title="' + escapeHtml(t.threadId) + '">' + escapeHtml(shortThreadTitle(t)) + '</td><td>' + compact(t.lastSevenDays?.totalTokens) + '</td><td>' + escapeHtml(t.model || S.unknownModel) + '</td><td>' + compact(t.events) + '</td><td>' + (t.updatedAt ? new Date(t.updatedAt).toLocaleString() : '-') + '</td></tr>').join('') +
         '</tbody></table>';
     }
 

@@ -15,6 +15,7 @@
   "config.showClaudeStatusBar": "Show Claude Code usage (5-hour/weekly limits, tokens) in the VS Code status bar.",
   "config.claudeConfigDir": "Claude config folder path. If empty, uses CLAUDE_CONFIG_DIR or ~/.claude.",
   "config.claudeExtraProjectPaths": "List of other environments' Claude projects folders to also include in token/cost/model aggregation. e.g. WSL: \\\\wsl$\\Ubuntu\\home\\you\\.claude\\projects, another drive: D:\\\\you\\.claude\\projects. Must be reachable as files from this PC.",
+  "config.codexExtraSessionPaths": "List of other environments' Codex sessions folders (or .codex homes) to also include in token/model aggregation. e.g. WSL: \\\\wsl$\\Ubuntu\\home\\you\\.codex\\sessions, another drive: D:\\\\you\\.codex\\sessions. Must be reachable as files from this PC.",
   "config.claudePlanRefreshSeconds": "Base interval to refresh Claude plan limits (5-hour/weekly) via the OAuth usage endpoint. Default 120s. This is the floor; on HTTP 429 the interval adaptively increases (×2, up to 15 min) and converges back toward this base, never below it.",
   "config.claudeTokenRefreshSeconds": "How often to re-aggregate tokens/cost from Claude transcripts (JSONL). Works together with file-change watching.",
   "config.claudeUsageAlertThresholds": "Show a notification when Claude 5-hour/weekly usage crosses these values (%). Empty array disables alerts. (Re-alerts after the window resets.)"

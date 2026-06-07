@@ -2,7 +2,7 @@
   "name": "codex-usage-monitor",
   "displayName": "%ext.displayName%",
   "description": "%ext.description%",
-  "version": "0.7.10",
+  "version": "0.7.13",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -95,6 +95,14 @@
           "default": [],
           "description": "%config.claudeExtraProjectPaths%"
         },
+        "codexUsageMonitor.codexExtraSessionPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "%config.codexExtraSessionPaths%"
+        },
         "codexUsageMonitor.claudePlanRefreshSeconds": {
           "type": "number",
           "default": 120,
@@ -141,3 +149,4 @@
     "typescript": "^5.7.2"
   }
 }
+
