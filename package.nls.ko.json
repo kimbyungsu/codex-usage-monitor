@@ -1,0 +1,21 @@
+{
+  "ext.displayName": "AI 에이전트 사용량 모니터 (Codex + Claude)",
+  "ext.description": "Codex와 Claude Code의 계정 사용량, 제한 상태(5시간/주간), 실시간 토큰 사용량을 VS Code 상태바와 대시보드에 함께 표시합니다.",
+  "cmd.openDashboard": "AI 사용량 모니터: 대시보드 열기",
+  "cmd.refresh": "AI 사용량 모니터: 새로고침",
+  "cmd.reconnect": "AI 사용량 모니터: Codex 다시 연결",
+  "cmd.refreshClaude": "AI 사용량 모니터: Claude 새로고침",
+  "config.title": "AI 에이전트 사용량 모니터",
+  "config.language": "표시 언어입니다. 'auto'는 VS Code 표시 언어를 따르고, 'en'/'ko'로 강제할 수 있습니다.",
+  "config.codexCommand": "Codex CLI를 실행할 명령 또는 절대 경로입니다.",
+  "config.refreshIntervalSeconds": "Codex 계정과 사용 제한 정보를 새로고침하는 주기(초)입니다.",
+  "config.extraUsageCommand": "커뮤니티/사용자 사용량 리포터 명령입니다. stdout 출력이 대시보드에 표시됩니다.",
+  "config.showStatusBar": "VS Code 상태바에 Codex 사용량을 표시합니다.",
+  "config.notifyOnStartup": "확장 시작 시 대시보드를 여는 안내 알림을 한 번 표시합니다.",
+  "config.showClaudeStatusBar": "VS Code 상태바에 Claude Code 사용량(5시간/주간 한도, 토큰)을 표시합니다.",
+  "config.claudeConfigDir": "Claude 설정 폴더 경로입니다. 비우면 CLAUDE_CONFIG_DIR 또는 ~/.claude 를 사용합니다.",
+  "config.claudeExtraProjectPaths": "다른 환경의 Claude projects 폴더 경로 목록입니다. 토큰·비용·모델 집계에 함께 합산됩니다. 예: WSL은 \\\\wsl$\\Ubuntu\\home\\사용자\\.claude\\projects, 다른 드라이브는 D:\\\\사용자\\.claude\\projects. 이 PC에서 파일로 접근 가능한 경로여야 합니다.",
+  "config.claudePlanRefreshSeconds": "Claude 플랜 한도(5시간/주간)를 OAuth usage 엔드포인트로 새로고침하는 기본 주기입니다. 기본 120초이며, 이 값이 하한입니다. HTTP 429가 나면 간격이 적응적으로 늘었다가(×2, 최대 15분) 이 기본값으로 수렴하며 그 아래로는 내려가지 않습니다.",
+  "config.claudeTokenRefreshSeconds": "Claude 트랜스크립트(JSONL)에서 토큰·비용을 재집계하는 주기입니다. 파일 변경 감지와 함께 동작합니다.",
+  "config.claudeUsageAlertThresholds": "Claude 5시간/주간 사용률이 이 값(%)을 넘으면 알림을 표시합니다. 빈 배열이면 알림을 끕니다. (윈도우가 리셋되면 다시 알림)"
+}

@@ -1,0 +1,143 @@
+{
+  "name": "codex-usage-monitor",
+  "displayName": "%ext.displayName%",
+  "description": "%ext.description%",
+  "version": "0.7.10",
+  "publisher": "local",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kimbyungsu/codex-usage-monitor.git"
+  },
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codexUsageMonitor.openDashboard",
+        "title": "%cmd.openDashboard%"
+      },
+      {
+        "command": "codexUsageMonitor.refresh",
+        "title": "%cmd.refresh%"
+      },
+      {
+        "command": "codexUsageMonitor.reconnect",
+        "title": "%cmd.reconnect%"
+      },
+      {
+        "command": "codexUsageMonitor.refreshClaude",
+        "title": "%cmd.refreshClaude%"
+      }
+    ],
+    "configuration": {
+      "title": "%config.title%",
+      "properties": {
+        "codexUsageMonitor.language": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "en",
+            "ko"
+          ],
+          "default": "auto",
+          "description": "%config.language%"
+        },
+        "codexUsageMonitor.codexCommand": {
+          "type": "string",
+          "default": "codex",
+          "description": "%config.codexCommand%"
+        },
+        "codexUsageMonitor.refreshIntervalSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 10,
+          "description": "%config.refreshIntervalSeconds%"
+        },
+        "codexUsageMonitor.extraUsageCommand": {
+          "type": "string",
+          "default": "",
+          "description": "%config.extraUsageCommand%"
+        },
+        "codexUsageMonitor.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.showStatusBar%"
+        },
+        "codexUsageMonitor.notifyOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.notifyOnStartup%"
+        },
+        "codexUsageMonitor.showClaudeStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.showClaudeStatusBar%"
+        },
+        "codexUsageMonitor.claudeConfigDir": {
+          "type": "string",
+          "default": "",
+          "description": "%config.claudeConfigDir%"
+        },
+        "codexUsageMonitor.claudeExtraProjectPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "%config.claudeExtraProjectPaths%"
+        },
+        "codexUsageMonitor.claudePlanRefreshSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 30,
+          "description": "%config.claudePlanRefreshSeconds%"
+        },
+        "codexUsageMonitor.claudeTokenRefreshSeconds": {
+          "type": "number",
+          "default": 15,
+          "minimum": 5,
+          "description": "%config.claudeTokenRefreshSeconds%"
+        },
+        "codexUsageMonitor.claudeUsageAlertThresholds": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "default": [
+            80,
+            95
+          ],
+          "description": "%config.claudeUsageAlertThresholds%"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "tsc --noEmit -p ./",
+    "clean:vsix": "node -e \"const fs=require('fs');fs.readdirSync('.').filter(f=>/^codex-usage-monitor-.*\\.vsix$/.test(f)).forEach(f=>fs.unlinkSync(f))\"",
+    "package": "npm run compile && npm run clean:vsix && vsce package --allow-missing-repository",
+    "pretest": "npm run compile",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.7",
+    "@types/node": "^22.10.2",
+    "@types/vscode": "^1.96.0",
+    "@vscode/test-electron": "^2.4.1",
+    "@vscode/vsce": "^3.9.2",
+    "glob": "^11.0.0",
+    "mocha": "^10.7.0",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,105 @@
+// Claude Code 사용량 모니터링에 쓰는 타입 정의.
+// - 플랜 한도(5시간/주간)는 Anthropic OAuth usage 엔드포인트에서 받는다.
+// - 토큰/비용/컨텍스트는 ~/.claude/projects/**/*.jsonl 트랜스크립트에서 집계한다.
+
+/** /api/oauth/usage 의 단일 윈도우 (5시간/주간/모델별). */
+export interface UsageWindow {
+  /** 0~100 사용률(%). */
+  utilization: number;
+  /** ISO8601 리셋 시각. */
+  resetsAt: string | null;
+}
+
+/** 초과 사용(extra usage) 크레딧 정보. */
+export interface ExtraUsage {
+  isEnabled: boolean;
+  utilization?: number | null;
+  usedCredits?: number | null;
+  monthlyLimit?: number | null;
+  currency?: string | null;
+  disabledReason?: string | null;
+}
+
+/** /api/oauth/usage 응답을 정규화한 형태. */
+export interface ClaudePlanUsage {
+  fiveHour?: UsageWindow | null;
+  sevenDay?: UsageWindow | null;
+  sevenDayOpus?: UsageWindow | null;
+  sevenDaySonnet?: UsageWindow | null;
+  extraUsage?: ExtraUsage | null;
+}
+
+/** 토큰 사용량 한 묶음(오늘/최근 5시간/세션/전체). */
+export interface TokenBucket {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  /** 모든 종류 합. */
+  totalTokens: number;
+  /** 모델 단가로 환산한 추정 비용(USD). */
+  costUsd: number;
+  /** 집계에 포함된 어시스턴트 메시지 수. */
+  messages: number;
+}
+
+/** JSONL에서 집계한 토큰/비용 묶음들. */
+export interface ClaudeTokenUsage {
+  total: TokenBucket;
+  today: TokenBucket;
+  /** 지금 기준 최근 5시간 롤링 윈도우. */
+  lastFiveHours: TokenBucket;
+  /** 지금 기준 최근 7일 롤링 윈도우. */
+  lastSevenDays: TokenBucket;
+  /** 가장 최근 세션(최근 수정된 트랜스크립트 파일). */
+  session: TokenBucket;
+  /** 현재 컨텍스트 점유량 = 마지막 메시지의 input+cacheRead+cacheCreation. */
+  contextTokens: number;
+  /** 현재 세션의 주 모델. */
+  sessionModel?: string;
+  /** 모델별 합계. 전체 기간 로스터를 유지하되 최근 7일 값도 함께 제공. */
+  byModel: Array<{
+    model: string;
+    totalTokens: number;
+    costUsd: number;
+    weekTokens: number;
+    weekCostUsd: number;
+    weekInputTokens: number;
+    weekCacheTokens: number;
+    weekOutputTokens: number;
+  }>;
+}
+
+/** 확장이 화면에 그릴 Claude 전체 상태. */
+export interface ClaudeState {
+  /** ~/.claude 자격증명이 확인되어 동작 가능한 상태인지. */
+  available: boolean;
+  connecting: boolean;
+  /** 구독 종류(max/pro 등). */
+  subscriptionType?: string | null;
+  rateLimitTier?: string | null;
+  plan?: ClaudePlanUsage | null;
+  tokens?: ClaudeTokenUsage | null;
+  lastPlanRefresh?: number;
+  lastTokenRefresh?: number;
+  /** 최근 사용률 추세로 추정한 한도 소진 예상. */
+  projection?: {
+    fiveHour?: { hoursToFull: number; etaMs: number } | null;
+    sevenDay?: { hoursToFull: number; etaMs: number } | null;
+  } | null;
+  /** 플랜 한도 API 관련 *실제* 오류(토큰 만료·인증서 등) — 알림 카드로 표시. */
+  planError?: string;
+  /** 일시적 요청 제한(429) 안내 — 알림이 아니라 차분한 상태 문구로 표시. */
+  planRateLimited?: string;
+  /** 토큰 집계 관련 오류(트랜스크립트 폴더 없음 등). */
+  tokenError?: string;
+}
+
+/** .credentials.json 에서 읽은 OAuth 자격증명. */
+export interface ClaudeCredentials {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt?: number;
+  subscriptionType?: string | null;
+  rateLimitTier?: string | null;
+}
