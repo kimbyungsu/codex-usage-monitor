@@ -805,7 +805,6 @@ export class Dashboard implements vscode.Disposable {
 
 // ===== Codex 상태바 =====
 export function formatStatusBarText(state: UsageState): string {
-  const T = t();
   if (state.connecting) {
     return "$(sync~spin) Codex";
   }
@@ -814,17 +813,14 @@ export function formatStatusBarText(state: UsageState): string {
   }
   const primary = state.rateLimits?.primary;
   const secondary = state.rateLimits?.secondary;
-  const tokens = state.tokenUsage?.tokenUsage.total.totalTokens;
-  const localFive = state.history?.lastFiveHours.totalTokens;
-  const localSeven = state.history?.lastSevenDays.totalTokens;
-  const fiveText = primary ? `5h ${formatUsed(primary)}·${countdownShortUnix(primary.resetsAt)}` : "5h ?";
-  const sevenText = secondary ? `7d ${formatUsed(secondary)}·${countdownShortUnix(secondary.resetsAt)}` : "7d ?";
-  const tokenText = typeof tokens === "number"
-    ? ` · ${T.codexThread} ${compactNumber(tokens)}`
-    : typeof localFive === "number" || typeof localSeven === "number"
-      ? ` · ${T.local} ${compactNumber(localFive ?? 0)}/${compactNumber(localSeven ?? 0)}`
-      : "";
-  return `$(pulse) Codex ${fiveText} ${sevenText}${tokenText}`;
+  // 남은 % (한도) · 카운트다운은 괄호로 분리해 핵심 숫자가 또렷하게. 토큰은 대시보드/툴팁에.
+  const fiveText = typeof primary?.usedPercent === "number"
+    ? `5h ${remainPct(primary.usedPercent)}% (${countdownShortUnix(primary.resetsAt)})`
+    : "5h ?";
+  const sevenText = typeof secondary?.usedPercent === "number"
+    ? `7d ${remainPct(secondary.usedPercent)}% (${countdownShortUnix(secondary.resetsAt)})`
+    : "7d ?";
+  return `$(pulse) Codex  ${fiveText} · ${sevenText}`;
 }
 
 export function formatTooltip(state: UsageState): string {
@@ -836,10 +832,10 @@ export function formatTooltip(state: UsageState): string {
   const primaryName = formatCodexWindowName(state.rateLimits?.primary, T.fiveHourLimit);
   const secondaryName = formatCodexWindowName(state.rateLimits?.secondary, T.sevenDayLimit);
   if (state.rateLimits?.primary) {
-    parts.push(`${primaryName}: ${T.usedResetsIn(state.rateLimits.primary.usedPercent, countdownLongUnix(state.rateLimits.primary.resetsAt), formatReset(state.rateLimits.primary.resetsAt))}`);
+    parts.push(`${primaryName}: ${T.remainResetsIn(remainPct(state.rateLimits.primary.usedPercent), countdownLongUnix(state.rateLimits.primary.resetsAt), formatReset(state.rateLimits.primary.resetsAt))}`);
   }
   if (state.rateLimits?.secondary) {
-    parts.push(`${secondaryName}: ${T.usedResetsIn(state.rateLimits.secondary.usedPercent, countdownLongUnix(state.rateLimits.secondary.resetsAt), formatReset(state.rateLimits.secondary.resetsAt))}`);
+    parts.push(`${secondaryName}: ${T.remainResetsIn(remainPct(state.rateLimits.secondary.usedPercent), countdownLongUnix(state.rateLimits.secondary.resetsAt), formatReset(state.rateLimits.secondary.resetsAt))}`);
   }
   if (state.tokenUsage) {
     parts.push(`${T.threadTokens}: ${state.tokenUsage.tokenUsage.total.totalTokens.toLocaleString()}`);
@@ -875,15 +871,10 @@ export function formatClaudeStatusBar(state: ClaudeState): string {
   }
   const five = plan?.fiveHour;
   const seven = plan?.sevenDay;
-  const fiveText = five ? `5h ${Math.round(five.utilization)}%·${countdownShort(five.resetsAt)}` : "5h ?";
-  const sevenText = seven ? `7d ${Math.round(seven.utilization)}%·${countdownShort(seven.resetsAt)}` : "7d ?";
-  const t5 = state.tokens?.lastFiveHours.totalTokens;
-  const t7 = state.tokens?.lastSevenDays.totalTokens;
-  const tokenText =
-    typeof t5 === "number" || typeof t7 === "number"
-      ? ` · ${compactNumber(t5 ?? 0)}/${compactNumber(t7 ?? 0)}`
-      : "";
-  return `$(hubot) Claude ${fiveText} ${sevenText}${tokenText}`;
+  // 남은 % (한도) · 카운트다운은 괄호로 분리. 토큰은 대시보드/툴팁에.
+  const fiveText = five ? `5h ${remainPct(five.utilization)}% (${countdownShort(five.resetsAt)})` : "5h ?";
+  const sevenText = seven ? `7d ${remainPct(seven.utilization)}% (${countdownShort(seven.resetsAt)})` : "7d ?";
+  return `$(hubot) Claude  ${fiveText} · ${sevenText}`;
 }
 
 export function formatClaudeTooltip(state: ClaudeState): string {
@@ -896,16 +887,16 @@ export function formatClaudeTooltip(state: ClaudeState): string {
   );
   const plan = state.plan;
   if (plan?.fiveHour) {
-    parts.push(`${T.fiveHourLimit}: ${Math.round(plan.fiveHour.utilization)}% ${T.used}, ${T.resetsIn} ${countdownLong(plan.fiveHour.resetsAt)}`);
+    parts.push(`${T.fiveHourLimit}: ${remainPct(plan.fiveHour.utilization)}% ${T.remaining}, ${T.resetsIn} ${countdownLong(plan.fiveHour.resetsAt)}`);
   }
   if (plan?.sevenDay) {
-    parts.push(`${T.sevenDayLimit}: ${Math.round(plan.sevenDay.utilization)}% ${T.used}, ${T.resetsIn} ${countdownLong(plan.sevenDay.resetsAt)}`);
+    parts.push(`${T.sevenDayLimit}: ${remainPct(plan.sevenDay.utilization)}% ${T.remaining}, ${T.resetsIn} ${countdownLong(plan.sevenDay.resetsAt)}`);
   }
   if (plan?.sevenDayOpus) {
-    parts.push(`${T.weeklyOpus}: ${Math.round(plan.sevenDayOpus.utilization)}%`);
+    parts.push(`${T.weeklyOpus}: ${remainPct(plan.sevenDayOpus.utilization)}% ${T.remaining}`);
   }
   if (plan?.sevenDaySonnet) {
-    parts.push(`${T.weeklySonnet}: ${Math.round(plan.sevenDaySonnet.utilization)}%`);
+    parts.push(`${T.weeklySonnet}: ${remainPct(plan.sevenDaySonnet.utilization)}% ${T.remaining}`);
   }
   const proj = state.projection;
   if (proj?.fiveHour?.reaches) {
@@ -932,8 +923,10 @@ export function formatClaudeTooltip(state: ClaudeState): string {
   return parts.join("\n");
 }
 
-function formatUsed(window: RateLimitSnapshot["primary"]): string {
-  return typeof window?.usedPercent === "number" ? `${window.usedPercent}%` : "?";
+/** 사용률(used%) → 남은 % (0~100). 상태바·툴팁은 "남은 한도"를 보여준다. */
+function remainPct(used: number | null | undefined): number {
+  const u = Number(used);
+  return isFinite(u) ? Math.max(0, 100 - Math.round(u)) : 0;
 }
 
 function formatCodexWindowName(window: RateLimitSnapshot["primary"], fallback: string): string {

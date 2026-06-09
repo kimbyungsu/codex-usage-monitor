@@ -29,9 +29,11 @@ interface TsStrings {
   fiveHourLimit: string;
   sevenDayLimit: string;
   usedResetsIn: (pct: number, cd: string, at: string) => string;
+  remainResetsIn: (pct: number, cd: string, at: string) => string;
   // Claude 툴팁
   claudeCredsMissing: string;
   used: string;
+  remaining: string;
   resetsIn: string;
   fiveHourEta: string;
   sevenDayEta: string;
@@ -81,8 +83,10 @@ const KO: TsStrings = {
   fiveHourLimit: "5시간 한도",
   sevenDayLimit: "7일 한도",
   usedResetsIn: (pct, cd, at) => `${pct}% 사용, 리셋까지 ${cd} (${at})`,
+  remainResetsIn: (pct, cd, at) => `${pct}% 남음, 리셋까지 ${cd} (${at})`,
   claudeCredsMissing: "Claude 자격증명 미확인",
   used: "사용",
+  remaining: "남음",
   resetsIn: "리셋까지",
   fiveHourEta: "5시간 소진 예상",
   sevenDayEta: "주간 소진 예상",
@@ -131,8 +135,10 @@ const EN: TsStrings = {
   fiveHourLimit: "5-hour limit",
   sevenDayLimit: "Weekly limit",
   usedResetsIn: (pct, cd, at) => `${pct}% used, resets in ${cd} (${at})`,
+  remainResetsIn: (pct, cd, at) => `${pct}% left, resets in ${cd} (${at})`,
   claudeCredsMissing: "Claude credentials not found",
   used: "used",
+  remaining: "left",
   resetsIn: "resets in",
   fiveHourEta: "5h limit ETA",
   sevenDayEta: "Weekly limit ETA",
