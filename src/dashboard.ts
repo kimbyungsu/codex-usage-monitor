@@ -832,10 +832,12 @@ export function formatTooltip(state: UsageState): string {
   const primaryName = formatCodexWindowName(state.rateLimits?.primary, T.fiveHourLimit);
   const secondaryName = formatCodexWindowName(state.rateLimits?.secondary, T.sevenDayLimit);
   if (state.rateLimits?.primary) {
-    parts.push(`${primaryName}: ${T.remainResetsIn(remainPct(state.rateLimits.primary.usedPercent), countdownLongUnix(state.rateLimits.primary.resetsAt), formatReset(state.rateLimits.primary.resetsAt))}`);
+    const w = state.rateLimits.primary;
+    parts.push(`${primaryName}: ${gaugeBar(w.usedPercent)} ${T.remainResetsIn(remainPct(w.usedPercent), countdownLongUnix(w.resetsAt), formatReset(w.resetsAt))}`);
   }
   if (state.rateLimits?.secondary) {
-    parts.push(`${secondaryName}: ${T.remainResetsIn(remainPct(state.rateLimits.secondary.usedPercent), countdownLongUnix(state.rateLimits.secondary.resetsAt), formatReset(state.rateLimits.secondary.resetsAt))}`);
+    const w = state.rateLimits.secondary;
+    parts.push(`${secondaryName}: ${gaugeBar(w.usedPercent)} ${T.remainResetsIn(remainPct(w.usedPercent), countdownLongUnix(w.resetsAt), formatReset(w.resetsAt))}`);
   }
   if (state.tokenUsage) {
     parts.push(`${T.threadTokens}: ${state.tokenUsage.tokenUsage.total.totalTokens.toLocaleString()}`);
@@ -887,16 +889,20 @@ export function formatClaudeTooltip(state: ClaudeState): string {
   );
   const plan = state.plan;
   if (plan?.fiveHour) {
-    parts.push(`${T.fiveHourLimit}: ${remainPct(plan.fiveHour.utilization)}% ${T.remaining}, ${T.resetsIn} ${countdownLong(plan.fiveHour.resetsAt)}`);
+    const u = plan.fiveHour.utilization;
+    parts.push(`${T.fiveHourLimit}: ${gaugeBar(u)} ${T.remainResetsIn(remainPct(u), countdownLong(plan.fiveHour.resetsAt), formatResetIso(plan.fiveHour.resetsAt))}`);
   }
   if (plan?.sevenDay) {
-    parts.push(`${T.sevenDayLimit}: ${remainPct(plan.sevenDay.utilization)}% ${T.remaining}, ${T.resetsIn} ${countdownLong(plan.sevenDay.resetsAt)}`);
+    const u = plan.sevenDay.utilization;
+    parts.push(`${T.sevenDayLimit}: ${gaugeBar(u)} ${T.remainResetsIn(remainPct(u), countdownLong(plan.sevenDay.resetsAt), formatResetIso(plan.sevenDay.resetsAt))}`);
   }
   if (plan?.sevenDayOpus) {
-    parts.push(`${T.weeklyOpus}: ${remainPct(plan.sevenDayOpus.utilization)}% ${T.remaining}`);
+    const u = plan.sevenDayOpus.utilization;
+    parts.push(`${T.weeklyOpus}: ${gaugeBar(u)} ${remainPct(u)}% ${T.remaining}`);
   }
   if (plan?.sevenDaySonnet) {
-    parts.push(`${T.weeklySonnet}: ${remainPct(plan.sevenDaySonnet.utilization)}% ${T.remaining}`);
+    const u = plan.sevenDaySonnet.utilization;
+    parts.push(`${T.weeklySonnet}: ${gaugeBar(u)} ${remainPct(u)}% ${T.remaining}`);
   }
   const proj = state.projection;
   if (proj?.fiveHour?.reaches) {
@@ -927,6 +933,31 @@ export function formatClaudeTooltip(state: ClaudeState): string {
 function remainPct(used: number | null | undefined): number {
   const u = Number(used);
   return isFinite(u) ? Math.max(0, 100 - Math.round(u)) : 0;
+}
+
+/**
+ * 사용률(used%)을 게이지 막대로 표현. 채워질수록 소진 → 100%면 10칸 가득(=다 씀).
+ * 빈 칸 = 남은 양(옆의 "X% 남음"과 시각적으로 일치). 기본 10칸=10% 해상도, 반칸(▌) 지원. 툴팁 전용.
+ */
+function gaugeBar(used: number | null | undefined, cells = 10): string {
+  const u = Math.max(0, Math.min(100, Number(used) || 0));
+  const exact = (u / 100) * cells;
+  let full = Math.floor(exact);
+  const frac = exact - full;
+  let half = false;
+  if (frac >= 0.75) {
+    full += 1; // 거의 한 칸 → 한 칸으로 올림
+  } else if (frac >= 0.25) {
+    half = true; // 애매한 값 → 반칸
+  }
+  full = Math.min(full, cells);
+  const empty = Math.max(0, cells - full - (half ? 1 : 0));
+  return "█".repeat(full) + (half ? "▌" : "") + "░".repeat(empty);
+}
+
+/** ISO reset 시각 → 표시 문자열 (Claude용; Codex는 formatReset(unix초) 사용). */
+function formatResetIso(iso: string | null | undefined): string {
+  return iso ? new Date(iso).toLocaleString() : t().unknown;
 }
 
 function formatCodexWindowName(window: RateLimitSnapshot["primary"], fallback: string): string {
