@@ -248,6 +248,7 @@
       card(S.sessionCard, codexSessionHtml(token, history, state)),
       card(S.trendCard, trendHtml(history.insights), "wide"),
       card(S.turnsCard, turnsHtml(history.insights, false), "wide"),
+      card(S.codexCacheCard, codexCacheHtml(history), "wide"),
       card(S.codexHistTitle, codexHistorySummaryHtml(history, state), "wide"),
       card(S.codexModelTitle, codexModelHtml(history), "wide"),
       card(S.heatmapCard, heatmapHtml(history.insights), "wide"),
@@ -378,7 +379,7 @@
     if (!list.length) return '<div class="value muted">' + S.no7dUse + "</div>";
     return '<div class="sub">' + S.codexModelNote + "</div>" +
       "<table><thead><tr><th>" + S.model + "</th><th>" + S.col7dTokens + "</th><th>" + S.colInput + "</th><th>" + S.colCache + "</th><th>" + S.colOutReason + "</th><th>" + S.colEvents + "</th></tr></thead><tbody>" +
-      list.map((m) => "<tr><td>" + escapeHtml(m.model || S.unknownModel) + "</td><td>" + compact(m.totalTokens) + "</td><td>" + compact(m.inputTokens) + "</td><td>" + compact(m.cachedInputTokens) + "</td><td>" + compact((m.outputTokens || 0) + (m.reasoningOutputTokens || 0)) + "</td><td>" + compact(m.events) + "</td></tr>").join("") +
+      list.map((m) => "<tr><td>" + escapeHtml(m.model || S.unknownModel) + "</td><td>" + compact(m.totalTokens) + "</td><td>" + compact(m.inputTokens) + "</td><td>" + compact(m.cachedInputTokens) + "</td><td>" + compact(m.outputTokens) + "</td><td>" + compact(m.events) + "</td></tr>").join("") +
       "</tbody></table>";
   }
   function codexThreadsHtml(history) {
@@ -518,22 +519,26 @@
       "<table><thead>" + head + "</thead><tbody>" + rows + "</tbody></table>";
   }
 
-  /** 캐시 효율: 적중률 도넛 + 절약 추정. */
-  function cacheHtml(cache) {
-    if (!cache || (cache.cacheReadTokens + cache.cacheWriteTokens + cache.freshInputTokens) <= 0) {
-      return '<div class="value muted">' + S.noData + "</div>";
-    }
-    const hit = clamp(cache.hitRatePercent || 0, 0, 100);
+  /** 적중률 도넛 SVG (캐시 카드 공용). */
+  function donutHtml(hitPct) {
+    const hit = clamp(hitPct || 0, 0, 100);
     const R = 27, C = 2 * Math.PI * R;
     const dash = (hit / 100) * C;
-    const donut =
-      '<div class="donutbox">' +
+    return '<div class="donutbox">' +
       '<svg class="donut" viewBox="0 0 76 76">' +
       '<circle class="track" cx="38" cy="38" r="' + R + '"/>' +
       '<circle class="arc" cx="38" cy="38" r="' + R + '" stroke-dasharray="' + dash.toFixed(1) + " " + C.toFixed(1) + '" transform="rotate(-90 38 38)"/>' +
       "</svg>" +
       '<div class="center">' + Math.round(hit) + "%</div>" +
       "</div>";
+  }
+
+  /** 캐시 효율(Claude): 적중률 도넛 + 절약 추정. */
+  function cacheHtml(cache) {
+    if (!cache || (cache.cacheReadTokens + cache.cacheWriteTokens + cache.freshInputTokens) <= 0) {
+      return '<div class="value muted">' + S.noData + "</div>";
+    }
+    const hit = clamp(cache.hitRatePercent || 0, 0, 100);
     const saved = cache.savedUsd || 0;
     const facts =
       '<div class="cachefacts">' +
@@ -541,7 +546,25 @@
       '<div class="value">' + (saved < 0 ? "-$" + money(-saved) : "$" + money(saved)) + ' <span class="muted" style="font-size:12px">/ 7d</span></div>' +
       '<div class="sub">' + S.cacheRead + " " + compact(cache.cacheReadTokens) + " · " + S.cacheWrite + " " + compact(cache.cacheWriteTokens) + " · " + S.freshInput + " " + compact(cache.freshInputTokens) + "</div>" +
       "</div>";
-    return '<div class="cachewrap">' + donut + facts + '</div><div class="sub">' + S.cacheNote + "</div>";
+    return '<div class="cachewrap">' + donutHtml(hit) + facts + '</div><div class="sub">' + S.cacheNote + "</div>";
+  }
+
+  /** 캐시 적중률(Codex): cached_input ⊆ input 의미론이라 적중률만 표시($ 미산출 정책). */
+  function codexCacheHtml(history) {
+    const wk = history && history.lastSevenDays;
+    const input = Number((wk && wk.inputTokens) || 0);
+    const cached = Number((wk && wk.cachedInputTokens) || 0);
+    if (input <= 0) {
+      return '<div class="value muted">' + S.noData + "</div>";
+    }
+    const hit = clamp((cached / input) * 100, 0, 100);
+    const facts =
+      '<div class="cachefacts">' +
+      '<div class="label" style="margin-bottom:2px">' + S.cacheHit + "</div>" +
+      '<div class="value">' + Math.round(hit) + '% <span class="muted" style="font-size:12px">/ 7d</span></div>' +
+      '<div class="sub">' + S.cacheRead + " " + compact(cached) + " · " + S.nonCachedInput + " " + compact(input - cached) + " · " + S.totalInput + " " + compact(input) + "</div>" +
+      "</div>";
+    return '<div class="cachewrap">' + donutHtml(hit) + facts + '</div><div class="sub">' + S.codexCacheNote + "</div>";
   }
 
   /** 요일 × 시간 히트맵. */

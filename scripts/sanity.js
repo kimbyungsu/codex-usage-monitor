@@ -27,8 +27,14 @@ const entries = [
 ];
 const ins = computeInsights(entries, now);
 assert.strictEqual(ins.daily.length, 14, "daily 14일");
+// 자정 부근 실행에도 안전하게: '오늘' 기대값을 로컬 자정 기준으로 동적 계산.
+const midnight = new Date(now);
+midnight.setHours(0, 0, 0, 0);
+const expectedToday = entries
+  .filter((e) => e.ts >= midnight.getTime())
+  .reduce((a, e) => a + e.totalTokens, 0);
 const todaySum = ins.daily[13].totalTokens;
-assert.ok(todaySum >= 6700, "오늘 합계에 오늘 항목 포함: " + todaySum);
+assert.strictEqual(todaySum, expectedToday, `오늘 합계 일치: ${todaySum} vs ${expectedToday}`);
 const opus = ins.modelTurns.find((m) => m.model === "opus");
 const haiku = ins.modelTurns.find((m) => m.model === "haiku");
 assert.strictEqual(opus.turns, 2, "opus 턴 2개");

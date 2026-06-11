@@ -102,7 +102,9 @@ export function readCodexHistory(
         ts: event.ts,
         model: event.model,
         totalTokens: event.usage.totalTokens,
-        outputTokens: event.usage.outputTokens + event.usage.reasoningOutputTokens,
+        // Codex 의미론: reasoning ⊆ output (total = input + output 으로 실측 확인).
+        // 합산하면 추론이 이중 계산되므로 output 만 쓴다.
+        outputTokens: event.usage.outputTokens,
         turnKey: event.turnId ? `${file}#${event.turnId}` : undefined,
       });
     }

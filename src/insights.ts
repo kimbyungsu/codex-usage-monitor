@@ -88,7 +88,10 @@ export function computeInsights(entries: Iterable<InsightEntry>, now = Date.now(
   todayStart.setHours(0, 0, 0, 0);
   const dailyStartMs = todayStart.getTime() - (DAILY_DAYS - 1) * DAY_MS;
   const heatmapStartMs = now - HEATMAP_DAYS * DAY_MS;
-  const hourEndStartMs = Math.floor(now / HOUR_MS) * HOUR_MS; // 현재 정시
+  // 현재 '로컬' 정시. UTC 정수 오프셋이 아닌 시간대(+5:30 등)에서도 시계 정시에 맞춘다.
+  const hourAnchor = new Date(now);
+  hourAnchor.setMinutes(0, 0, 0);
+  const hourEndStartMs = hourAnchor.getTime();
   const hourlyStartMs = hourEndStartMs - 23 * HOUR_MS;
   const sevenDaysAgo = now - 7 * DAY_MS;
 
