@@ -2,7 +2,7 @@
   "name": "codex-usage-monitor",
   "displayName": "%ext.displayName%",
   "description": "%ext.description%",
-  "version": "0.7.16",
+  "version": "0.8.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {

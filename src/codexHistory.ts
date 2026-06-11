@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { StringDecoder } from "string_decoder";
+import { computeInsights, InsightEntry } from "./insights";
 import {
   CodexHistoryUsage,
   CodexModelUsage,
@@ -14,6 +15,8 @@ interface ParsedEvent {
   ts: number;
   model: string;
   usage: TokenUsageBreakdown;
+  /** 이 이벤트가 속한 턴 ID(턴 마커 없는 옛 로그는 undefined → 턴 통계 제외). */
+  turnId?: string;
 }
 
 interface FileSummary {
@@ -85,6 +88,7 @@ export function readCodexHistory(
   const byModel = new Map<string, CodexModelUsage>();
   const summaries: FileSummary[] = [];
 
+  const insightEntries: InsightEntry[] = [];
   for (const file of files) {
     const summary = parseRolloutFile(file);
     summaries.push(summary);
@@ -94,6 +98,13 @@ export function readCodexHistory(
       if (event.ts >= fiveHoursAgo) addBucket(lastFiveHours, event.usage, event.model);
       if (event.ts >= sevenDaysAgo) addBucket(lastSevenDays, event.usage, event.model);
       if (event.ts >= sevenDaysAgo) addModel(byModel, event.model, event.usage);
+      insightEntries.push({
+        ts: event.ts,
+        model: event.model,
+        totalTokens: event.usage.totalTokens,
+        outputTokens: event.usage.outputTokens + event.usage.reasoningOutputTokens,
+        turnKey: event.turnId ? `${file}#${event.turnId}` : undefined,
+      });
     }
   }
 
@@ -142,6 +153,7 @@ export function readCodexHistory(
     sessionModel: newest?.latestModel,
     byModel: [...byModel.values()].sort((a, b) => b.totalTokens - a.totalTokens),
     recentThreads,
+    insights: computeInsights(insightEntries, now),
     filesScanned: files.length,
     lastScannedAt: Date.now(),
   };
@@ -301,6 +313,7 @@ function parseRolloutFile(file: string): FileSummary {
       ts: isFinite(ts) ? ts : 0,
       model: model || latestModel || "unknown",
       usage: last,
+      turnId: currentTurnId,
     });
   };
 

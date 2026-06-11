@@ -7,6 +7,18 @@ VS Code에서 **Codex와 Claude Code 사용량을 동시에** 항시 볼 수 있
 - **Codex**: 로컬 `codex app-server --stdio` 를 실행해 현재 세션의 계정/제한/토큰을 실시간으로 받아옵니다. (`auth.json` 토큰을 복사하지 않음) 비용은 표시하지 않고 한도·토큰·모델 사용량에 집중합니다.
 - **Claude Code**: 공식 `/usage` 명령이 호출하는 것과 동일한 OAuth usage 엔드포인트를 `~/.claude/.credentials.json` 의 토큰으로 호출해 5시간/주간 한도를 받고, `~/.claude/projects/**/*.jsonl` 트랜스크립트에서 토큰·비용을 집계합니다. 토큰이 만료되면 자동 갱신합니다.
 
+## 스크린샷
+
+**Claude Code 섹션** — 한도 사용률 스파크라인(점선 = 추세 연장) · 최근 14일 사용 추이(모델별 스택) · 모델별 턴당 토큰(평균/중앙값/P90/$) · 캐시 효율(적중률·절약 추정) · 요일×시간 활동 히트맵:
+
+![Claude 대시보드](docs/screenshot-claude.png)
+
+**Codex 섹션** — 동일한 추이/턴당 통계/히트맵 시각화(비용 표시 제외 정책 유지):
+
+![Codex 대시보드](docs/screenshot-codex.png)
+
+> 스크린샷의 토큰·차트 수치는 실제 로컬 로그를 집계한 값이며, 계정·한도 %·스레드 이름은 예시/익명화된 값입니다. `node scripts/make-screenshots.js` 로 재생성할 수 있습니다.
+
 ## 기능
 
 - VS Code 왼쪽 상태바에 `Codex`, `Claude` 두 항목을 나란히 표시
@@ -15,12 +27,22 @@ VS Code에서 **Codex와 Claude Code 사용량을 동시에** 항시 볼 수 있
 - **Codex**: 연결/계정, 사용 한도 윈도우(기본/보조)의 사용률 %·리셋·기간, 크레딧, 지출 한도, 최근 토큰, 최근 7일 로컬 토큰·모델·스레드, **다른 환경 합치기**, 사용자 지정 명령 출력
 - 토큰은 트랜스크립트 파일 변경 감지로 실시간에 가깝게 갱신
 
+### 시각화 / 인사이트 (Claude·Codex 공통, v0.8+)
+
+외부 라이브러리 없이 인라인 SVG로 그려 오프라인·CSP 환경에서도 동작합니다.
+
+- **사용 추이 차트**: 최근 14일 일별 토큰을 모델별 색상 스택 막대로, 최근 24시간을 시간별 미니 막대로 표시 (막대 위 마우스 오버로 상세)
+- **턴당 토큰 통계**: 모델별로 1턴(사용자 입력→최종 응답, 도구 호출·서브에이전트 포함)의 평균·중앙값·P90·출력 토큰을 표시. 평균만이 아니라 분포를 함께 보여 "긴 턴 하나가 평균을 끌어올렸는지" 구분 가능. Claude는 턴당 추정 비용($)도 표시
+- **캐시 효율 (Claude)**: 캐시 적중률 도넛과 "캐시 덕에 절약한 추정 비용"(캐시 쓰기 할증을 차감한 순절감) 표시
+- **활동 히트맵**: 최근 4주 요일×시간대 토큰 분포 — 언제 많이 쓰는지 한눈에
+- **한도 스파크라인**: 5시간/주간 한도 카드 안에 최근 사용률 추이를 그리고, 현재 추세 연장선(점선)과 100% 도달 예상점을 함께 표시
+
 ## 설치 / 적용
 
-저장소에서 가장 최신 `codex-usage-monitor-*.vsix` 를 설치합니다.
+[Releases](https://github.com/kimbyungsu/codex-usage-monitor/releases) 에서 가장 최신 `codex-usage-monitor-*.vsix` 를 내려받아 설치합니다.
 
 ```powershell
-# 폴더에서 가장 최신 버전 자동 설치
+# 내려받은 폴더에서 가장 최신 버전 자동 설치
 code --install-extension (Get-ChildItem codex-usage-monitor-*.vsix | Sort-Object Name | Select-Object -Last 1).FullName --force
 ```
 

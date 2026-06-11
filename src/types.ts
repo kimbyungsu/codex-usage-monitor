@@ -1,3 +1,5 @@
+import { UsageInsights } from "./insights";
+
 export interface CodexAccount {
   type: string;
   email?: string;
@@ -94,6 +96,8 @@ export interface CodexHistoryUsage {
   sessionModel?: string;
   byModel: CodexModelUsage[];
   recentThreads: CodexThreadUsage[];
+  /** 일별/시간별/히트맵/턴 통계 (차트용 압축 시리즈). */
+  insights?: UsageInsights;
   filesScanned: number;
   lastScannedAt: number;
   error?: string;
@@ -111,6 +115,8 @@ export interface UsageState {
     primary?: { reaches: boolean; hoursToFull?: number; etaMs?: number } | null;
     secondary?: { reaches: boolean; hoursToFull?: number; etaMs?: number } | null;
   } | null;
+  /** 한도 사용률 추세 샘플(최근 2시간) — 대시보드 스파크라인용. */
+  samples?: Array<{ ts: number; primary?: number; secondary?: number }>;
   tokenUsage?: TokenUsageNotification | null;
   history?: CodexHistoryUsage | null;
   lastRefresh?: number;

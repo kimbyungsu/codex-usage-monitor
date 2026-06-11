@@ -97,6 +97,7 @@ export class UsageService implements vscode.Disposable {
         rateLimits: limits.rateLimits,
         rateLimitsByLimitId: limits.rateLimitsByLimitId,
         projection: this.computeProjection(sampledAt, limits.rateLimits),
+        samples: [...this.rlSamples],
         lastRefresh: sampledAt,
         connected: true,
         connecting: false,

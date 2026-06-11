@@ -305,6 +305,36 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     dayWindow: "일 윈도우",
     hourWindow: "시간 윈도우",
     minWindow: "분 윈도우",
+    // 사용 추이 차트
+    trendCard: "사용 추이 (이 PC · 최근 14일)",
+    trendDailyNote: "일별 토큰 · 모델별 색상 · 막대에 마우스를 올리면 상세",
+    trendHourlyTitle: "최근 24시간",
+    etcModels: "기타",
+    // 턴당 통계
+    turnsCard: "턴당 토큰 (이 PC · 최근 7일)",
+    turnsNote: "턴 = 사용자 입력 1회부터 최종 응답까지(도구 호출·서브에이전트 포함) · 턴은 토큰을 가장 많이 쓴 모델에 귀속 · 턴 구분 정보가 없는 옛 로그는 제외됩니다.",
+    colTurns: "턴",
+    colCalls: "호출",
+    colAvgTurn: "평균/턴",
+    colMedianTurn: "중앙값",
+    colP90Turn: "P90",
+    colOutTurn: "출력/턴",
+    colCostTurn: "$/턴",
+    noTurnData: "최근 7일 턴 데이터 없음",
+    // 캐시 효율
+    cacheCard: "캐시 효율 (이 PC · 최근 7일 · 추정)",
+    cacheHit: "캐시 적중률",
+    cacheSaved: "절약 추정",
+    cacheRead: "캐시 읽기",
+    cacheWrite: "캐시 쓰기",
+    freshInput: "일반 입력",
+    cacheNote: "적중률 = 캐시 읽기 ÷ (캐시 읽기+캐시 쓰기+일반 입력) · 절약 = 캐시 읽기를 일반 입력 단가로 냈을 때와의 차액에서 캐시 쓰기 할증을 뺀 순절감 추정치입니다.",
+    // 활동 히트맵
+    heatmapCard: "활동 히트맵 (이 PC · 최근 4주)",
+    heatmapNote: "요일 × 시간대별 토큰 분포 — 진할수록 많이 사용",
+    weekdaysShort: "월,화,수,목,금,토,일",
+    // 한도 스파크라인
+    sparkNote: "최근 사용률 추이 · 점선은 현재 추세 연장",
   };
 
   const en: Record<string, string> = {
@@ -432,6 +462,36 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     dayWindow: "d window",
     hourWindow: "h window",
     minWindow: "m window",
+    // Usage trend chart
+    trendCard: "Usage trend (this PC · last 14d)",
+    trendDailyNote: "Daily tokens · colored by model · hover a bar for details",
+    trendHourlyTitle: "Last 24 hours",
+    etcModels: "other",
+    // Per-turn stats
+    turnsCard: "Tokens per turn (this PC · last 7d)",
+    turnsNote: "A turn spans one user input to the final response (tool calls and subagents included) · each turn is attributed to the model that used the most tokens · old logs without turn markers are excluded.",
+    colTurns: "Turns",
+    colCalls: "Calls",
+    colAvgTurn: "Avg/turn",
+    colMedianTurn: "Median",
+    colP90Turn: "P90",
+    colOutTurn: "Out/turn",
+    colCostTurn: "$/turn",
+    noTurnData: "No turn data in last 7 days",
+    // Cache efficiency
+    cacheCard: "Cache efficiency (this PC · last 7d · est.)",
+    cacheHit: "Cache hit rate",
+    cacheSaved: "Est. saved",
+    cacheRead: "Cache read",
+    cacheWrite: "Cache write",
+    freshInput: "Fresh input",
+    cacheNote: "Hit rate = cache read ÷ (cache read + cache write + fresh input) · savings = what cache reads would cost at fresh-input rates, minus the cache-write premium (net estimate).",
+    // Activity heatmap
+    heatmapCard: "Activity heatmap (this PC · last 4 weeks)",
+    heatmapNote: "Tokens by weekday × hour — darker means heavier use",
+    weekdaysShort: "Mon,Tue,Wed,Thu,Fri,Sat,Sun",
+    // Limit sparkline
+    sparkNote: "Recent utilization trend · dashed line extends the current rate",
   };
 
   return lang === "ko" ? ko : en;

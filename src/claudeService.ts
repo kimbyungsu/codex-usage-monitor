@@ -8,7 +8,8 @@ import * as path from "path";
 import { StringDecoder } from "string_decoder";
 import * as vscode from "vscode";
 import { fetchPlanUsage, projectsDir, readCredentials, resolveConfigDir } from "./claudeApi";
-import { ClaudeState, ClaudeThreadUsage, ClaudeTokenUsage, TokenBucket } from "./claudeTypes";
+import { ClaudeCacheStats, ClaudeState, ClaudeThreadUsage, ClaudeTokenUsage, TokenBucket } from "./claudeTypes";
+import { computeInsights, InsightEntry } from "./insights";
 import { t } from "./i18n";
 
 // 모델별 100만 토큰당 단가(USD). 구독 사용자는 실제 청구가 아니라 'API 환산 비용'.
@@ -41,6 +42,10 @@ interface UsageEntry {
   cacheCreate: number;
   cost: number;
   key: string; // msgId:requestId (중복 제거용)
+  /** 이 항목이 속한 턴 번호(파일 내 실제 사용자 입력 기준 누적). */
+  turn: number;
+  /** 서브에이전트(sidechain) 호출 여부. */
+  sidechain: boolean;
 }
 
 interface FileCache {
@@ -53,6 +58,8 @@ interface FileCache {
   parsedBytes: number;
   /** 증분 파싱용: 개행이 아직 안 온 마지막 미완성 라인. */
   tailLeftover: string;
+  /** 증분 파싱용: 지금까지 본 턴 수(다음 증분에서 이어서 센다). */
+  turnSeq: number;
 }
 
 function emptyBucket(): TokenBucket {
@@ -185,6 +192,7 @@ export class ClaudeService implements vscode.Disposable {
       available: Boolean(result.usage) || this.state.available,
       plan: result.usage ?? this.state.plan,
       projection,
+      samples: [...this.planSamples],
       subscriptionType: result.subscriptionType ?? this.state.subscriptionType,
       rateLimitTier: result.rateLimitTier ?? this.state.rateLimitTier,
       lastPlanRefresh: result.usage ? Date.now() : this.state.lastPlanRefresh,
@@ -424,7 +432,7 @@ export class ClaudeService implements vscode.Disposable {
       }
       if (cached && stat.size > cached.size && cached.parsedBytes <= stat.size) {
         // 파일이 늘어난 append 케이스: 새로 추가된 꼬리만 파싱해 이어붙인다(대용량 세션 성능).
-        const delta = this.parseFileRange(file, cached.parsedBytes, cached.tailLeftover);
+        const delta = this.parseFileRange(file, cached.parsedBytes, cached.tailLeftover, cached.turnSeq);
         this.fileCaches.set(file, {
           mtimeMs: stat.mtimeMs,
           size: stat.size,
@@ -433,10 +441,11 @@ export class ClaudeService implements vscode.Disposable {
           sessionId: cached.sessionId || delta.sessionId,
           parsedBytes: delta.parsedBytes,
           tailLeftover: delta.tailLeftover,
+          turnSeq: delta.turnSeq,
         });
       } else {
         // 신규/재작성(크기 축소 등): 전체를 스트리밍으로 파싱(>512MB도 안전).
-        const parsed = this.parseFileRange(file, 0, "");
+        const parsed = this.parseFileRange(file, 0, "", 0);
         this.fileCaches.set(file, {
           mtimeMs: stat.mtimeMs,
           size: stat.size,
@@ -445,6 +454,7 @@ export class ClaudeService implements vscode.Disposable {
           sessionId: parsed.sessionId,
           parsedBytes: parsed.parsedBytes,
           tailLeftover: parsed.tailLeftover,
+          turnSeq: parsed.turnSeq,
         });
       }
     }
@@ -479,8 +489,14 @@ export class ClaudeService implements vscode.Disposable {
       }
     >();
     const seen = new Set<string>();
+    const insightEntries: InsightEntry[] = [];
+    // 캐시 효율(최근 7일): 적중률과 '캐시가 없었다면 더 냈을' 순절감 추정.
+    let cacheRead7 = 0;
+    let cacheWrite7 = 0;
+    let freshInput7 = 0;
+    let savedUsd7 = 0;
 
-    for (const cache of this.fileCaches.values()) {
+    for (const [filePath, cache] of this.fileCaches.entries()) {
       for (const e of cache.entries) {
         if (e.key && seen.has(e.key)) {
           continue;
@@ -510,8 +526,23 @@ export class ClaudeService implements vscode.Disposable {
           m.weekInputTokens += e.input;
           m.weekCacheTokens += e.cacheRead + e.cacheCreate;
           m.weekOutputTokens += e.output;
+          const r = rateFor(e.model);
+          cacheRead7 += e.cacheRead;
+          cacheWrite7 += e.cacheCreate;
+          freshInput7 += e.input;
+          // 절감 = 캐시읽기를 일반입력 단가로 냈을 차액 − 캐시쓰기 할증(5m 단가 기준 근사).
+          savedUsd7 +=
+            (e.cacheRead * (r.input - r.cacheRead) - e.cacheCreate * (r.cacheWrite5m - r.input)) / 1e6;
         }
         byModel.set(e.model, m);
+        insightEntries.push({
+          ts: e.ts,
+          model: e.model,
+          totalTokens: tokensOfEntry,
+          outputTokens: e.output,
+          costUsd: e.cost,
+          turnKey: `${filePath}#${e.turn}`,
+        });
       }
     }
 
@@ -585,6 +616,15 @@ export class ClaudeService implements vscode.Disposable {
     threads.sort((a, b) => b.updatedAt - a.updatedAt);
     const recentThreads = threads.slice(0, 8);
 
+    const denom = cacheRead7 + cacheWrite7 + freshInput7;
+    const cacheStats: ClaudeCacheStats = {
+      cacheReadTokens: cacheRead7,
+      cacheWriteTokens: cacheWrite7,
+      freshInputTokens: freshInput7,
+      hitRatePercent: denom > 0 ? (cacheRead7 / denom) * 100 : 0,
+      savedUsd: savedUsd7,
+    };
+
     return {
       total,
       today,
@@ -597,6 +637,8 @@ export class ClaudeService implements vscode.Disposable {
       byModel: [...byModel.entries()]
         .map(([model, v]) => ({ model, ...v }))
         .sort((a, b) => b.totalTokens - a.totalTokens),
+      insights: computeInsights(insightEntries, now),
+      cache: cacheStats,
     };
   }
 
@@ -612,12 +654,21 @@ export class ClaudeService implements vscode.Disposable {
     file: string,
     startOffset: number,
     initialLeftover: string,
-  ): { entries: UsageEntry[]; cwd?: string; sessionId?: string; parsedBytes: number; tailLeftover: string } {
+    startTurnSeq: number,
+  ): {
+    entries: UsageEntry[];
+    cwd?: string;
+    sessionId?: string;
+    parsedBytes: number;
+    tailLeftover: string;
+    turnSeq: number;
+  } {
     const entries: UsageEntry[] = [];
     let cwd: string | undefined;
     let sessionId: string | undefined;
     let parsedBytes = startOffset;
     let leftover = initialLeftover;
+    let turnSeq = startTurnSeq;
 
     const handleLine = (line: string): void => {
       const trimmed = line.trim();
@@ -633,6 +684,18 @@ export class ClaudeService implements vscode.Disposable {
       // 파일 레벨 메타(스레드 식별·제목용)는 usage 유무와 무관하게 가능한 한 채운다.
       if (typeof obj.cwd === "string" && obj.cwd) cwd = obj.cwd;
       if (typeof obj.sessionId === "string" && obj.sessionId) sessionId = obj.sessionId;
+      // 턴 경계 = 실제 사용자 입력(도구 결과·메타·서브에이전트 프롬프트 제외).
+      // 이후 등장하는 모든 usage(서브에이전트 포함)는 이 턴에 귀속된다.
+      if (obj.type === "user" && !obj.isSidechain && !obj.isMeta && obj.toolUseResult == null) {
+        const c = obj.message?.content;
+        const isRealInput =
+          typeof c === "string"
+            ? c.trim().length > 0
+            : Array.isArray(c) && c.some((p: any) => p && p.type === "text");
+        if (isRealInput) {
+          turnSeq += 1;
+        }
+      }
       const usage = obj?.message?.usage;
       if (!usage) {
         return;
@@ -652,6 +715,8 @@ export class ClaudeService implements vscode.Disposable {
         cacheCreate: num(usage.cache_creation_input_tokens) || c5 + c1,
         cost: entryCost(model, usage),
         key: msgId || reqId ? `${msgId}:${reqId}` : "",
+        turn: turnSeq,
+        sidechain: Boolean(obj.isSidechain),
       });
     };
 
@@ -689,7 +754,7 @@ export class ClaudeService implements vscode.Disposable {
       }
     }
 
-    return { entries, cwd, sessionId, parsedBytes, tailLeftover: leftover };
+    return { entries, cwd, sessionId, parsedBytes, tailLeftover: leftover, turnSeq };
   }
 
   private listTranscripts(dir: string): string[] {
