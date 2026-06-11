@@ -331,12 +331,14 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     cacheNote: "적중률 = 캐시 읽기 ÷ (캐시 읽기+캐시 쓰기+일반 입력) · 절약 = 캐시 읽기를 일반 입력 단가로 냈을 때와의 차액에서 캐시 쓰기 할증을 뺀 순절감 추정치입니다.",
     // Codex 캐시 적중률
     codexCacheCard: "캐시 적중률 (이 PC · 최근 7일)",
-    codexCacheNote: "Codex의 캐시 읽기(cached_input)는 입력(input)의 부분집합입니다 · 적중률 = 캐시 읽기 ÷ 전체 입력 · Codex는 모델 단가를 표시하지 않는 정책이라 절약액($)은 산출하지 않습니다.",
+    codexCacheNote: "Codex의 캐시 읽기(cached_input)는 입력(input)의 부분집합입니다 · 적중률 = 캐시 읽기 ÷ 전체 입력 · 절약액($)은 Codex의 새 모델/별칭이 자주 바뀌어 모델별 단가 자동 매칭을 안정적으로 보장할 수 없어 산출하지 않습니다.",
     nonCachedInput: "비캐시 입력",
     totalInput: "전체 입력",
     // 활동 히트맵
     heatmapCard: "활동 히트맵 (이 PC · 최근 4주)",
-    heatmapNote: "요일 × 시간대별 토큰 분포 — 진할수록 많이 사용",
+    heatmapNote: "요일 × 시간대별 토큰 분포",
+    heatLess: "적음",
+    heatMore: "많음",
     weekdaysShort: "월,화,수,목,금,토,일",
     // 한도 스파크라인
     sparkNote: "최근 사용률 추이 · 점선은 현재 추세 연장",
@@ -493,12 +495,14 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     cacheNote: "Hit rate = cache read ÷ (cache read + cache write + fresh input) · savings = what cache reads would cost at fresh-input rates, minus the cache-write premium (net estimate).",
     // Codex cache hit rate
     codexCacheCard: "Cache hit rate (this PC · last 7d)",
-    codexCacheNote: "Codex cached_input is a subset of input · hit rate = cache reads ÷ total input · Codex does not show model pricing, so no $ savings are estimated.",
+    codexCacheNote: "Codex cached_input is a subset of input · hit rate = cache reads ÷ total input · $ savings are not estimated because Codex model IDs/aliases change too often to guarantee stable automatic price matching.",
     nonCachedInput: "Non-cached input",
     totalInput: "Total input",
     // Activity heatmap
     heatmapCard: "Activity heatmap (this PC · last 4 weeks)",
-    heatmapNote: "Tokens by weekday × hour — darker means heavier use",
+    heatmapNote: "Tokens by weekday × hour",
+    heatLess: "Less",
+    heatMore: "More",
     weekdaysShort: "Mon,Tue,Wed,Thu,Fri,Sat,Sun",
     // Limit sparkline
     sparkNote: "Recent utilization trend · dashed line extends the current rate",

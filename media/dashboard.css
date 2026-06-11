@@ -131,6 +131,15 @@ svg.donut circle.arc { fill: none; stroke: var(--accent); stroke-width: 9; strok
   background: var(--accent);
 }
 .hm i.cell.empty { background: var(--vscode-input-background); opacity: 1; }
+.hmlegend {
+  display: flex; align-items: center; justify-content: flex-end;
+  gap: 3px; margin-top: 6px; font-size: 10px; color: var(--muted);
+}
+.hmlegend i.cell {
+  display: inline-block; width: 15px; height: 10px; border-radius: 2px;
+  background: var(--accent);
+}
+.hmlegend i.cell.empty { background: var(--vscode-input-background); }
 
 @media (max-width: 720px) {
   .shell { padding: 14px; }

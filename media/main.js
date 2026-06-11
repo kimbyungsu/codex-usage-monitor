@@ -592,7 +592,13 @@
         }
       }
     }
-    return '<div class="sub" style="margin-top:0">' + S.heatmapNote + '</div><div class="hm">' + cells + "</div>";
+    // GitHub 잔디 스타일 범례: 적음 → 많음 그라데이션 (테마 무관하게 방향이 명확).
+    const legend = '<div class="hmlegend">' + escapeHtml(S.heatLess) +
+      [0, 0.25, 0.5, 0.75, 1].map((v) =>
+        v === 0 ? '<i class="cell empty"></i>' : '<i class="cell" style="opacity:' + (0.15 + 0.85 * v).toFixed(3) + '"></i>'
+      ).join("") +
+      escapeHtml(S.heatMore) + "</div>";
+    return '<div class="sub" style="margin-top:0">' + S.heatmapNote + '</div><div class="hm">' + cells + "</div>" + legend;
   }
 
   /** 한도 사용률 스파크라인(Claude: ISO 윈도우 키 five/seven). 점선 = 현재 추세 연장. */
