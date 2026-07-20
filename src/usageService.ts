@@ -3,8 +3,8 @@ import * as fs from "fs";
 import * as path from "path";
 import { promisify } from "util";
 import * as vscode from "vscode";
-import { readCodexHistory } from "./codexHistory";
 import { CodexRpcClient } from "./codexClient";
+import { CodexHistoryWorkerClient } from "./codexHistoryWorkerClient";
 import {
   AccountReadResponse,
   RateLimitsReadResponse,
@@ -22,6 +22,10 @@ export class UsageService implements vscode.Disposable {
   private serverBaseMs = 60_000;
   private serverIntervalMs = 60_000;
   private serverFailureCount = 0;
+  private readonly historyWorker: CodexHistoryWorkerClient;
+  private localRefreshInFlight?: Promise<void>;
+  private localRefreshQueued = false;
+  private disposed = false;
   /** rate-limit 사용률 추세 추정용 샘플 버퍼 (Claude planSamples와 동일 개념). */
   private rlSamples: Array<{ ts: number; primary?: number; secondary?: number }> = [];
   private readonly onDidChangeEmitter = new vscode.EventEmitter<UsageState>();
@@ -32,7 +36,15 @@ export class UsageService implements vscode.Disposable {
 
   readonly onDidChange = this.onDidChangeEmitter.event;
 
-  constructor(private readonly output: vscode.OutputChannel) {}
+  constructor(
+    private readonly output: vscode.OutputChannel,
+    historyCacheDir: string,
+  ) {
+    this.historyWorker = new CodexHistoryWorkerClient(
+      path.join(historyCacheDir, "codex-history-cache-v4"),
+      (message) => this.output.appendLine(message),
+    );
+  }
 
   get currentState(): UsageState {
     return this.state;
@@ -40,7 +52,8 @@ export class UsageService implements vscode.Disposable {
 
   async start(): Promise<void> {
     await this.reconnect();
-    await this.refreshLocal();
+    // 최초 대용량 로컬 스캔은 Worker에서 백그라운드 실행한다. activate() 완료를 막지 않는다.
+    void this.refreshLocal();
     this.configureTimer();
   }
 
@@ -111,24 +124,58 @@ export class UsageService implements vscode.Disposable {
     }
   }
 
-  private async refreshLocal(): Promise<void> {
+  private refreshLocal(): Promise<void> {
+    if (this.localRefreshInFlight) {
+      this.localRefreshQueued = true;
+      return this.localRefreshInFlight;
+    }
+    const run = this.performRefreshLocal();
+    this.localRefreshInFlight = run;
+    void run.finally(() => {
+      if (this.localRefreshInFlight === run) {
+        this.localRefreshInFlight = undefined;
+      }
+      if (this.localRefreshQueued && !this.disposed) {
+        this.localRefreshQueued = false;
+        void this.refreshLocal();
+      }
+    });
+    return run;
+  }
+
+  private async performRefreshLocal(): Promise<void> {
     const now = Date.now();
     const extraSessionPaths = this.config().get<string[]>("codexExtraSessionPaths", []) || [];
-    const [extraUsage, history] = await Promise.all([
-      this.readExtraUsageCommand(),
-      Promise.resolve(readCodexHistory(undefined, extraSessionPaths)),
-    ]);
-
-    const hasPreviousHistory = Boolean(this.state.history && !this.state.history.error);
-    const historyFailed = Boolean(history.error);
-    this.setState({
-      history: historyFailed && hasPreviousHistory ? this.state.history : history,
-      historyError: history.error,
-      lastHistoryScanAt: now,
-      lastHistoryScanOkAt: historyFailed ? this.state.lastHistoryScanOkAt : now,
-      extraUsageOutput: extraUsage.output,
-      extraUsageError: extraUsage.error,
-    });
+    try {
+      const [extraUsage, scan] = await Promise.all([
+        this.readExtraUsageCommand(),
+        this.historyWorker.scan(undefined, extraSessionPaths),
+      ]);
+      const history = scan.history;
+      const d = scan.diagnostics;
+      this.output.appendLine(
+        `[codex] history scan ${d.elapsedMs}ms; files=${history.filesScanned}; bytes=${d.bytesRead}; `
+        + `hits=${d.cacheHits}; full=${d.filesParsedFull}; incremental=${d.filesParsedIncremental}; `
+        + `cacheWrites=${d.cacheFilesWritten}`,
+      );
+      const hasPreviousHistory = Boolean(this.state.history && !this.state.history.error);
+      const historyFailed = Boolean(history.error);
+      this.setState({
+        history: historyFailed && hasPreviousHistory ? this.state.history : history,
+        historyError: history.error,
+        lastHistoryScanAt: now,
+        lastHistoryScanOkAt: historyFailed ? this.state.lastHistoryScanOkAt : now,
+        extraUsageOutput: extraUsage.output,
+        extraUsageError: extraUsage.error,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.output.appendLine(`[codex] history scan failed: ${message}`);
+      this.setState({
+        historyError: message,
+        lastHistoryScanAt: now,
+      });
+    }
   }
 
   private noteServerFailure(error: Error): void {
@@ -177,6 +224,7 @@ export class UsageService implements vscode.Disposable {
   }
 
   dispose(): void {
+    this.disposed = true;
     if (this.serverTimer) {
       clearTimeout(this.serverTimer);
     }
@@ -184,6 +232,7 @@ export class UsageService implements vscode.Disposable {
       clearInterval(this.localTimer);
     }
     this.client?.dispose();
+    this.historyWorker.dispose();
     this.onDidChangeEmitter.dispose();
   }
 
