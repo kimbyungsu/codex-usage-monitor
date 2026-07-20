@@ -38,7 +38,7 @@ function hasUsableClaude(state: ClaudeState): boolean {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel("AI 에이전트 사용량 모니터");
-  const service = new UsageService(output);
+  const service = new UsageService(output, context.globalStorageUri.fsPath);
   const claude = new ClaudeService(output);
   const dashboard = new Dashboard(context.extensionUri, service, claude);
 
