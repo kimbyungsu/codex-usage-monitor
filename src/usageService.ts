@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { promisify } from "util";
 import * as vscode from "vscode";
-import { readCodexHistory } from "./codexHistory";
+import { readCodexHistoryAsync } from "./codexHistory";
 import { CodexRpcClient } from "./codexClient";
 import {
   AccountReadResponse,
@@ -116,7 +116,8 @@ export class UsageService implements vscode.Disposable {
     const extraSessionPaths = this.config().get<string[]>("codexExtraSessionPaths", []) || [];
     const [extraUsage, history] = await Promise.all([
       this.readExtraUsageCommand(),
-      Promise.resolve(readCodexHistory(undefined, extraSessionPaths)),
+      // 비동기 집계: 바뀐 파일의 새 꼬리만 읽고, 읽는 동안에도 확장 호스트를 멈추지 않는다.
+      readCodexHistoryAsync(undefined, extraSessionPaths),
     ]);
 
     const hasPreviousHistory = Boolean(this.state.history && !this.state.history.error);

@@ -136,7 +136,8 @@
     "clean:vsix": "node -e \"const fs=require('fs');fs.readdirSync('.').filter(f=>/^codex-usage-monitor-.*\\.vsix$/.test(f)).forEach(f=>fs.unlinkSync(f))\"",
     "package": "npm run compile && npm run clean:vsix && vsce package --allow-missing-repository",
     "pretest": "npm run compile",
-    "test": "node ./out/test/runTest.js"
+    "test": "node ./out/test/runTest.js",
+    "test:history": "npm run compile && node scripts/history-incremental.test.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.7",
