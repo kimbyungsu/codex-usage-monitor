@@ -1,8 +1,10 @@
 import { UsageInsights } from "./insights";
+import type { LimitProjection, LimitSample, LimitWindow } from "./limits";
 
 export interface CodexAccount {
   type: string;
   email?: string;
+  /** 서버의 내부 요금제 식별자(예: plus, prolite). 표시는 codexPlanLabel 로. */
   planType?: string;
 }
 
@@ -33,6 +35,7 @@ export interface RateLimitSnapshot {
   secondary?: RateLimitWindow | null;
   credits?: CreditsSnapshot | null;
   individualLimit?: SpendControlLimitSnapshot | null;
+  spendControlReached?: boolean | null;
   rateLimitReachedType?: string | null;
 }
 
@@ -110,13 +113,17 @@ export interface UsageState {
   requiresOpenaiAuth?: boolean;
   rateLimits?: RateLimitSnapshot | null;
   rateLimitsByLimitId?: Record<string, RateLimitSnapshot> | null;
-  /** 최근 사용률 추세로 추정한 한도 소진 예상(창 리셋 전 도달 시에만 reaches=true). Claude 방식과 동일. */
-  projection?: {
-    primary?: { reaches: boolean; hoursToFull?: number; etaMs?: number } | null;
-    secondary?: { reaches: boolean; hoursToFull?: number; etaMs?: number } | null;
-  } | null;
-  /** 한도 사용률 추세 샘플(최근 2시간) — 대시보드 스파크라인용. */
-  samples?: Array<{ ts: number; primary?: number; secondary?: number }>;
+  /** 요금제 표시명(공식 Codex TUI 표기, 미지의 값은 원문). */
+  planLabel?: string | null;
+  /**
+   * 서버가 보고한 한도 창(창 길이로 분류, 짧은 창 → 긴 창 · 기본 버킷 → 모델 전용 버킷).
+   * primary/secondary 위치는 플랜에 따라 의미가 바뀌므로(5시간 창이 없으면 주간 창이 primary) 표시는 이것만 쓴다.
+   */
+  limits?: LimitWindow[];
+  /** 최근 사용률 추세로 추정한 한도 소진 예상(창 id별, 창 리셋 전 도달 시에만 reaches=true). Claude 방식과 동일. */
+  projection?: Record<string, LimitProjection | null> | null;
+  /** 한도 사용률 추세 샘플(창 id별 최근 2시간) — 대시보드 스파크라인용. */
+  samples?: Record<string, LimitSample[]>;
   tokenUsage?: TokenUsageNotification | null;
   history?: CodexHistoryUsage | null;
   lastRefresh?: number;

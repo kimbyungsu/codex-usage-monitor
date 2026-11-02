@@ -1,5 +1,5 @@
 // Claude Code 사용량 서비스.
-//  1) 플랜 한도(5시간/주간): Anthropic OAuth usage 엔드포인트 (claudeApi.ts)
+//  1) 플랜 한도(서버가 보고하는 창들 — 5시간·주간·모델 전용 등): Anthropic OAuth usage 엔드포인트 (claudeApi.ts)
 //  2) 토큰/비용/컨텍스트: ~/.claude/projects/**/*.jsonl 트랜스크립트 집계
 // 두 소스를 합쳐 상태를 만들고, 주기적 갱신 + 파일 감시로 실시간에 가깝게 유지한다.
 
@@ -7,10 +7,11 @@ import * as fs from "fs";
 import * as path from "path";
 import { StringDecoder } from "string_decoder";
 import * as vscode from "vscode";
-import { fetchPlanUsage, projectsDir, readCredentials, resolveConfigDir } from "./claudeApi";
+import { fetchPlanUsage, projectsDir, readCredentials, readPlanDisplayName, resolveConfigDir } from "./claudeApi";
 import { ClaudeCacheStats, ClaudeState, ClaudeThreadUsage, ClaudeTokenUsage, TokenBucket } from "./claudeTypes";
 import { computeInsights, InsightEntry } from "./insights";
-import { t } from "./i18n";
+import { LimitTrend, LimitWindow } from "./limits";
+import { limitLabel, t } from "./i18n";
 
 // 모델별 100만 토큰당 단가(USD). 구독 사용자는 실제 청구가 아니라 'API 환산 비용'.
 interface Rate {
@@ -121,8 +122,8 @@ export class ClaudeService implements vscode.Disposable {
   private plan429Count = 0;
   /** 연속 성공 횟수. 일정 횟수마다 간격을 한 단계 완화. */
   private planSuccessStreak = 0;
-  /** 사용률 추세 추정용 샘플 버퍼. */
-  private planSamples: Array<{ ts: number; five?: number; seven?: number }> = [];
+  /** 창별 사용률 추세(소진 예상·스파크라인). */
+  private readonly trend = new LimitTrend();
   /** 이미 알림을 보낸 (윈도우:임계치:리셋앵커) 키. */
   private alertedKeys = new Set<string>();
   private readonly emitter = new vscode.EventEmitter<ClaudeState>();
@@ -141,6 +142,7 @@ export class ClaudeService implements vscode.Disposable {
       available: Boolean(creds),
       subscriptionType: creds?.subscriptionType,
       rateLimitTier: creds?.rateLimitTier,
+      planDisplayName: readPlanDisplayName(configDir),
     });
     await Promise.all([this.refreshPlan(), this.refreshTokens()]);
     this.configureTimers();
@@ -182,9 +184,9 @@ export class ClaudeService implements vscode.Disposable {
     let projection = this.state.projection;
     if (result.usage) {
       const now = Date.now();
-      this.recordSample(now, result.usage);
-      projection = this.computeProjection(now, result.usage);
-      this.checkAlerts(result.usage);
+      this.trend.record(now, result.usage.windows);
+      projection = this.trend.projections(now, result.usage.windows);
+      this.checkAlerts(result.usage.windows);
     }
 
     this.setState({
@@ -192,9 +194,10 @@ export class ClaudeService implements vscode.Disposable {
       available: Boolean(result.usage) || this.state.available,
       plan: result.usage ?? this.state.plan,
       projection,
-      samples: [...this.planSamples],
+      samples: this.trend.samples(),
       subscriptionType: result.subscriptionType ?? this.state.subscriptionType,
       rateLimitTier: result.rateLimitTier ?? this.state.rateLimitTier,
+      planDisplayName: readPlanDisplayName(this.configDir()) ?? this.state.planDisplayName,
       lastPlanRefresh: result.usage ? Date.now() : this.state.lastPlanRefresh,
       // 429는 차분한 상태 문구(planRateLimited)로만, 진짜 오류(토큰만료·인증서)는 알림 카드(planError)로.
       planError: result.rateLimited ? undefined : result.error,
@@ -212,73 +215,8 @@ export class ClaudeService implements vscode.Disposable {
     this.planTimer = setTimeout(() => void this.refreshPlan(), this.planIntervalMs);
   }
 
-  /** 사용률 추세 추정을 위한 샘플 기록(리셋으로 급락 시 버퍼 초기화). */
-  private recordSample(
-    now: number,
-    usage: {
-      fiveHour?: { utilization: number } | null;
-      sevenDay?: { utilization: number } | null;
-    },
-  ): void {
-    // 5시간·주간 모두 '이번 응답'에서 직접 읽는다(state 반영 전 값이 섞이지 않도록).
-    const five = usage.fiveHour?.utilization;
-    const seven = usage.sevenDay?.utilization;
-    const last = this.planSamples[this.planSamples.length - 1];
-    // 5시간 사용률이 크게 떨어졌으면(=윈도우 리셋) 이전 추세를 버린다.
-    if (last && typeof five === "number" && typeof last.five === "number" && five < last.five - 5) {
-      this.planSamples = [];
-    }
-    this.planSamples.push({ ts: now, five, seven });
-    // 최근 2시간, 최대 60개만 유지.
-    const cutoff = now - 2 * 60 * 60 * 1000;
-    this.planSamples = this.planSamples.filter((s) => s.ts >= cutoff).slice(-60);
-  }
-
-  private computeProjection(
-    now: number,
-    usage: { fiveHour?: { resetsAt: string | null } | null; sevenDay?: { resetsAt: string | null } | null },
-  ): ClaudeState["projection"] {
-    const s = this.planSamples;
-    if (s.length < 2) {
-      return null;
-    }
-    const newest = s[s.length - 1];
-    const oldest = s[0];
-    const dtHours = (newest.ts - oldest.ts) / 3_600_000;
-    if (dtHours < 0.05) {
-      return null; // 표본 구간이 너무 짧으면 추정 보류
-    }
-    // 창이 리셋되기 전에 한도에 닿을 때만 reaches=true. 닿기 전에 리셋되면(또는 증가세 ~0)
-    // reaches=false → UI는 "이번 창 내 미도달"로 표시(5시간 창에 '2일 후 소진' 같은 모순 방지).
-    const proj = (cur?: number, old?: number, resetsAt?: string | null) => {
-      if (typeof cur !== "number" || typeof old !== "number") {
-        return null; // 데이터 없음
-      }
-      const ratePerHour = (cur - old) / dtHours; // %/시간
-      if (ratePerHour <= 0.05) {
-        return { reaches: false }; // 증가세 거의 없음 → 이번 창 미도달
-      }
-      const hoursToFull = (100 - cur) / ratePerHour;
-      if (!isFinite(hoursToFull) || hoursToFull < 0) {
-        return { reaches: false };
-      }
-      const etaMs = now + hoursToFull * 3_600_000;
-      const resetMs = resetsAt ? Date.parse(resetsAt) : NaN;
-      if (isFinite(resetMs) && etaMs >= resetMs) {
-        return { reaches: false }; // 리셋이 먼저 → 이번 창에선 미도달
-      }
-      return { reaches: true, hoursToFull, etaMs };
-    };
-    return {
-      fiveHour: proj(newest.five, oldest.five, usage.fiveHour?.resetsAt),
-      sevenDay: proj(newest.seven, oldest.seven, usage.sevenDay?.resetsAt),
-    };
-  }
-
-  private checkAlerts(usage: {
-    fiveHour?: { utilization: number; resetsAt: string | null } | null;
-    sevenDay?: { utilization: number; resetsAt: string | null } | null;
-  }): void {
+  /** 서버가 보고한 창마다 임계치 알림(적용되지 않는 창은 목록에 없으므로 자연히 제외). */
+  private checkAlerts(windows: LimitWindow[]): void {
     const thresholds = (this.cfg().get<number[]>("claudeUsageAlertThresholds", [80, 95]) || [])
       .filter((n) => typeof n === "number" && n > 0)
       .sort((a, b) => a - b);
@@ -287,29 +225,24 @@ export class ClaudeService implements vscode.Disposable {
     }
     const T = t();
     const activeAnchors = new Set<string>();
-    const check = (label: string, w?: { utilization: number; resetsAt: string | null } | null) => {
-      if (!w || typeof w.utilization !== "number") {
-        return;
-      }
-      const anchor = w.resetsAt ?? "";
+    for (const w of windows) {
+      const anchor = w.resetsAtMs ?? "";
       // 임계치를 넘긴 것 중 가장 높은 단계만 알림(중복 최소화).
-      const crossed = thresholds.filter((th) => w.utilization >= th);
+      const crossed = thresholds.filter((th) => w.usedPercent >= th);
       for (const th of crossed) {
-        activeAnchors.add(`${label}:${th}:${anchor}`);
+        activeAnchors.add(`${w.id}:${th}:${anchor}`);
       }
       const top = crossed[crossed.length - 1];
       if (top === undefined) {
-        return;
+        continue;
       }
-      const key = `${label}:${top}:${anchor}`;
+      const key = `${w.id}:${top}:${anchor}`;
       if (!this.alertedKeys.has(key)) {
         this.alertedKeys.add(key);
-        const reset = w.resetsAt ? new Date(w.resetsAt).toLocaleString() : "";
-        void vscode.window.showWarningMessage(T.alert(label, Math.round(w.utilization), top, reset));
+        const reset = w.resetsAtMs ? new Date(w.resetsAtMs).toLocaleString() : "";
+        void vscode.window.showWarningMessage(T.alert(limitLabel(w, T), Math.round(w.usedPercent), top, reset));
       }
-    };
-    check(T.alertFiveHour, usage.fiveHour);
-    check(T.alertWeekly, usage.sevenDay);
+    }
     // 현재 윈도우와 무관한(리셋되어 anchor가 바뀐) 옛 키 정리.
     for (const k of [...this.alertedKeys]) {
       if (!activeAnchors.has(k)) {

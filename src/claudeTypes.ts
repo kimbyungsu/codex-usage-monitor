@@ -1,8 +1,9 @@
 // Claude Code 사용량 모니터링에 쓰는 타입 정의.
-// - 플랜 한도(5시간/주간)는 Anthropic OAuth usage 엔드포인트에서 받는다.
+// - 플랜 한도(서버가 보고하는 창들: 5시간·주간·모델 전용 등)는 Anthropic OAuth usage 엔드포인트에서 받는다.
 // - 토큰/비용/컨텍스트는 ~/.claude/projects/**/*.jsonl 트랜스크립트에서 집계한다.
 
 import { UsageInsights } from "./insights";
+import { LimitProjection, LimitSample, LimitWindow } from "./limits";
 
 /** 캐시 효율 요약(이 PC · 최근 7일 · 추정). */
 export interface ClaudeCacheStats {
@@ -18,14 +19,6 @@ export interface ClaudeCacheStats {
   savedUsd: number;
 }
 
-/** /api/oauth/usage 의 단일 윈도우 (5시간/주간/모델별). */
-export interface UsageWindow {
-  /** 0~100 사용률(%). */
-  utilization: number;
-  /** ISO8601 리셋 시각. */
-  resetsAt: string | null;
-}
-
 /** 초과 사용(extra usage) 크레딧 정보. */
 export interface ExtraUsage {
   isEnabled: boolean;
@@ -38,10 +31,8 @@ export interface ExtraUsage {
 
 /** /api/oauth/usage 응답을 정규화한 형태. */
 export interface ClaudePlanUsage {
-  fiveHour?: UsageWindow | null;
-  sevenDay?: UsageWindow | null;
-  sevenDayOpus?: UsageWindow | null;
-  sevenDaySonnet?: UsageWindow | null;
+  /** 서버가 보고한 한도 창(서버 순서). 5시간 창이 없는 플랜·시기에는 그냥 빠져 있다. */
+  windows: LimitWindow[];
   extraUsage?: ExtraUsage | null;
 }
 
@@ -117,20 +108,19 @@ export interface ClaudeState {
   /** ~/.claude 자격증명이 확인되어 동작 가능한 상태인지. */
   available: boolean;
   connecting: boolean;
-  /** 구독 종류(max/pro 등). */
+  /** 구독 종류(내부 식별자: max/pro 등 — 요금제 개명과 무관하게 유지될 수 있음). */
   subscriptionType?: string | null;
   rateLimitTier?: string | null;
+  /** 서버가 주는 요금제 표시명(예: 개명 후 이름). 없으면 subscriptionType 으로 대체 표시. */
+  planDisplayName?: string | null;
   plan?: ClaudePlanUsage | null;
   tokens?: ClaudeTokenUsage | null;
   lastPlanRefresh?: number;
   lastTokenRefresh?: number;
-  /** 최근 사용률 추세로 추정한 한도 소진 예상. */
-  projection?: {
-    fiveHour?: { reaches: boolean; hoursToFull?: number; etaMs?: number } | null;
-    sevenDay?: { reaches: boolean; hoursToFull?: number; etaMs?: number } | null;
-  } | null;
-  /** 한도 사용률 추세 샘플(최근 2시간) — 대시보드 스파크라인용. */
-  samples?: Array<{ ts: number; five?: number; seven?: number }>;
+  /** 최근 사용률 추세로 추정한 한도 소진 예상(창 id별). */
+  projection?: Record<string, LimitProjection | null> | null;
+  /** 한도 사용률 추세 샘플(창 id별 최근 2시간) — 대시보드 스파크라인용. */
+  samples?: Record<string, LimitSample[]>;
   /** 플랜 한도 API 관련 *실제* 오류(토큰 만료·인증서 등) — 알림 카드로 표시. */
   planError?: string;
   /** 일시적 요청 제한(429) 안내 — 알림이 아니라 차분한 상태 문구로 표시. */

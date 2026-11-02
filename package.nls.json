@@ -1,6 +1,6 @@
 {
   "ext.displayName": "AI Agent Usage Monitor (Codex + Claude)",
-  "ext.description": "Shows Codex and Claude Code account usage, limit status (5-hour/weekly), and real-time token usage in the VS Code status bar and a dashboard.",
+  "ext.description": "Shows Codex and Claude Code account usage, limit status (whatever windows the server reports: 5-hour, weekly, model-specific), and real-time token usage in the VS Code status bar and a dashboard.",
   "cmd.openDashboard": "AI Usage Monitor: Open dashboard",
   "cmd.refresh": "AI Usage Monitor: Refresh",
   "cmd.reconnect": "AI Usage Monitor: Reconnect Codex",
@@ -12,11 +12,11 @@
   "config.extraUsageCommand": "A community/user usage reporter command. Its stdout is shown in the dashboard.",
   "config.showStatusBar": "Show Codex usage in the VS Code status bar.",
   "config.notifyOnStartup": "Show a one-time notice on startup to open the dashboard.",
-  "config.showClaudeStatusBar": "Show Claude Code usage (5-hour/weekly limits, tokens) in the VS Code status bar.",
+  "config.showClaudeStatusBar": "Show Claude Code usage (reported limit windows, tokens) in the VS Code status bar.",
   "config.claudeConfigDir": "Claude config folder path. If empty, uses CLAUDE_CONFIG_DIR or ~/.claude.",
   "config.claudeExtraProjectPaths": "List of other environments' Claude projects folders to also include in token/cost/model aggregation. e.g. WSL: \\\\wsl$\\Ubuntu\\home\\you\\.claude\\projects, another drive: D:\\\\you\\.claude\\projects. Must be reachable as files from this PC.",
   "config.codexExtraSessionPaths": "List of other environments' Codex sessions folders (or .codex homes) to also include in token/model aggregation. e.g. WSL: \\\\wsl$\\Ubuntu\\home\\you\\.codex\\sessions, another drive: D:\\\\you\\.codex\\sessions. Must be reachable as files from this PC.",
-  "config.claudePlanRefreshSeconds": "Base interval to refresh Claude plan limits (5-hour/weekly) via the OAuth usage endpoint. Default 120s. This is the floor; on HTTP 429 the interval adaptively increases (×2, up to 15 min) and converges back toward this base, never below it.",
+  "config.claudePlanRefreshSeconds": "Base interval to refresh Claude plan limits via the OAuth usage endpoint. Default 120s. This is the floor; on HTTP 429 the interval adaptively increases (×2, up to 15 min) and converges back toward this base, never below it.",
   "config.claudeTokenRefreshSeconds": "How often to re-aggregate tokens/cost from Claude transcripts (JSONL). Works together with file-change watching.",
-  "config.claudeUsageAlertThresholds": "Show a notification when Claude 5-hour/weekly usage crosses these values (%). Empty array disables alerts. (Re-alerts after the window resets.)"
+  "config.claudeUsageAlertThresholds": "Show a notification when any reported Claude limit window crosses these values (%). Empty array disables alerts. (Re-alerts after the window resets.)"
 }

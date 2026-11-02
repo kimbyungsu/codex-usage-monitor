@@ -2,10 +2,18 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as nodePath from "path";
 import { UsageService } from "./usageService";
-import { RateLimitSnapshot, UsageState } from "./types";
+import { UsageState } from "./types";
 import { ClaudeService } from "./claudeService";
 import { ClaudeState } from "./claudeTypes";
-import { resolveLang, t, webviewStrings } from "./i18n";
+import { limitLabel, resolveLang, t, webviewStrings } from "./i18n";
+import {
+  hasAccountFiveHour,
+  LimitProjection,
+  LimitWindow,
+  shortSpanLabel,
+  statusBarWindows,
+  windowLevel,
+} from "./limits";
 
 export class Dashboard implements vscode.Disposable {
   private panel?: vscode.WebviewPanel;
@@ -87,10 +95,19 @@ export class Dashboard implements vscode.Disposable {
   }
 
   private postState(): void {
-    this.panel?.webview.postMessage({
+    if (!this.panel) {
+      return;
+    }
+    const codex = this.service.currentState;
+    const claude = this.claude.currentState;
+    this.panel.webview.postMessage({
       type: "state",
-      state: this.service.currentState,
-      claude: this.claude.currentState,
+      state: { ...codex, limits: withLabels(codex.limits) },
+      claude: {
+        ...claude,
+        planText: claudePlanText(claude),
+        plan: claude.plan ? { ...claude.plan, windows: withLabels(claude.plan.windows) } : claude.plan,
+      },
       extraPaths: this.getExtraPaths(),
       codexExtraPaths: this.getCodexExtraPaths(),
     });
@@ -304,6 +321,69 @@ export class Dashboard implements vscode.Disposable {
   }
 }
 
+// ===== 한도 창 공통 표기 =====
+
+/**
+ * 상태바 조각: "<약어> <남은%> (<리셋까지>)". 값은 서버가 이 계정에 보고한 창에서만 나온다.
+ * 계정 전체 5시간 칸은 늘 맨 앞에 고정 — 요금제·시기상 5시간 창이 없으면 "5h 없음"으로 두어,
+ * 주간 등 다른 창이 그 자리로 밀려 보이지 않게 하고 5시간 제한이 없다는 사실도 드러낸다.
+ * 다시 보고되면(부활) 같은 자리에 % 가 나타난다.
+ */
+function statusBarLimitText(windows: LimitWindow[]): string {
+  if (!windows.length) {
+    return "";
+  }
+  // 남은 % (한도) · 카운트다운은 괄호로 분리해 핵심 숫자가 또렷하게. 토큰은 대시보드/툴팁에.
+  const isAccountFive = (w: LimitWindow) => w.span === "5h" && !w.scope;
+  const shown = statusBarWindows(windows);
+  const parts = [...shown.filter(isAccountFive), ...shown.filter((w) => !isAccountFive(w))].map((w) => {
+    const scope = w.scope ? ` ${w.scope}` : "";
+    return `${shortSpanLabel(w)}${scope} ${remainPct(w.usedPercent)}% (${countdownShort(w.resetsAtMs)})`;
+  });
+  if (!hasAccountFiveHour(windows)) {
+    parts.unshift(`5h ${t().noneShort}`);
+  }
+  return parts.join(" · ");
+}
+
+/** 툴팁 줄들: 창마다 게이지 + 남은% + 리셋, 계정 전체 5시간 창이 없으면 그 사실(현재 요금제명 포함)을 한 줄로. */
+function tooltipLimitLines(
+  windows: LimitWindow[],
+  projection: Record<string, LimitProjection | null> | null | undefined,
+  planName?: string | null,
+): string[] {
+  const T = t();
+  const lines = windows.map((w) => {
+    const pct = remainPct(w.usedPercent);
+    const tail = w.resetsAtMs
+      ? T.remainResetsIn(pct, countdownLong(w.resetsAtMs), new Date(w.resetsAtMs).toLocaleString())
+      : T.remainNoReset(pct);
+    return `${limitLabel(w, T)}: ${gaugeBar(w.usedPercent)} ${tail}`;
+  });
+  if (windows.length && !hasAccountFiveHour(windows)) {
+    lines.push(T.noFiveHour(planName ?? null));
+  }
+  for (const w of windows) {
+    const p = projection?.[w.id];
+    if (p?.reaches) {
+      lines.push(`${T.limitEta(limitLabel(w, T))}: ${formatHours(p.hoursToFull ?? 0)} ${T.after}`);
+    }
+  }
+  return lines;
+}
+
+/** 대시보드로 보낼 때 창마다 표시 라벨을 붙인다(라벨 규칙은 i18n.limitLabel 한 곳). */
+function withLabels(windows: LimitWindow[] | undefined): LimitWindow[] | undefined {
+  if (!windows) return windows;
+  const T = t();
+  return windows.map((w) => ({ ...w, label: limitLabel(w, T) }));
+}
+
+/** 상태바 강조색 기준(0/1/2): 상태바에 올린 창 중 최고 단계. 서버 심각도 우선, 없으면 80/95%. */
+export function statusBarLevel(windows: LimitWindow[] | undefined): 0 | 1 | 2 {
+  return statusBarWindows(windows ?? []).reduce<0 | 1 | 2>((max, w) => Math.max(max, windowLevel(w)) as 0 | 1 | 2, 0);
+}
+
 // ===== Codex 상태바 =====
 export function formatStatusBarText(state: UsageState): string {
   if (state.connecting) {
@@ -312,34 +392,22 @@ export function formatStatusBarText(state: UsageState): string {
   if (!state.connected) {
     return "$(warning) Codex";
   }
-  const primary = state.rateLimits?.primary;
-  const secondary = state.rateLimits?.secondary;
-  // 남은 % (한도) · 카운트다운은 괄호로 분리해 핵심 숫자가 또렷하게. 토큰은 대시보드/툴팁에.
-  const fiveText = typeof primary?.usedPercent === "number"
-    ? `5h ${remainPct(primary.usedPercent)}% (${countdownShortUnix(primary.resetsAt)})`
-    : "5h ?";
-  const sevenText = typeof secondary?.usedPercent === "number"
-    ? `7d ${remainPct(secondary.usedPercent)}% (${countdownShortUnix(secondary.resetsAt)})`
-    : "7d ?";
-  return `$(pulse) Codex  ${fiveText} · ${sevenText}`;
+  const limits = statusBarLimitText(state.limits ?? []);
+  if (limits) {
+    return `$(pulse) Codex  ${limits}`;
+  }
+  const t7 = state.history?.lastSevenDays?.totalTokens;
+  return typeof t7 === "number" ? `$(pulse) Codex 7d ${compactNumber(t7)} (${t().local})` : "$(pulse) Codex";
 }
 
 export function formatTooltip(state: UsageState): string {
   const T = t();
   const parts = [state.connected ? T.codexConnected : T.codexDisconnected];
   if (state.account) {
-    parts.push(`${T.codexAccount}: ${state.account.email ?? state.account.type} (${state.account.planType ?? "unknown"})`);
+    const plan = state.planLabel ?? state.account.planType ?? "unknown";
+    parts.push(`${T.codexAccount}: ${state.account.email ?? state.account.type} (${plan})`);
   }
-  const primaryName = formatCodexWindowName(state.rateLimits?.primary, T.fiveHourLimit);
-  const secondaryName = formatCodexWindowName(state.rateLimits?.secondary, T.sevenDayLimit);
-  if (state.rateLimits?.primary) {
-    const w = state.rateLimits.primary;
-    parts.push(`${primaryName}: ${gaugeBar(w.usedPercent)} ${T.remainResetsIn(remainPct(w.usedPercent), countdownLongUnix(w.resetsAt), formatReset(w.resetsAt))}`);
-  }
-  if (state.rateLimits?.secondary) {
-    const w = state.rateLimits.secondary;
-    parts.push(`${secondaryName}: ${gaugeBar(w.usedPercent)} ${T.remainResetsIn(remainPct(w.usedPercent), countdownLongUnix(w.resetsAt), formatReset(w.resetsAt))}`);
-  }
+  parts.push(...tooltipLimitLines(state.limits ?? [], state.projection, state.planLabel ?? state.account?.planType));
   if (state.tokenUsage) {
     parts.push(`${T.threadTokens}: ${state.tokenUsage.tokenUsage.total.totalTokens.toLocaleString()}`);
   }
@@ -358,11 +426,20 @@ export function formatTooltip(state: UsageState): string {
 }
 
 // ===== Claude 상태바 =====
+
+/** 요금제 표시: 서버 표시명(개명 반영) 우선, 내부 식별자는 보조. */
+export function claudePlanText(state: ClaudeState): string | null {
+  const internal = [state.subscriptionType, state.rateLimitTier].filter(Boolean).join(" · ");
+  if (state.planDisplayName) {
+    return internal ? `${state.planDisplayName} (${internal})` : state.planDisplayName;
+  }
+  return internal || null;
+}
+
 export function formatClaudeStatusBar(state: ClaudeState): string {
   const T = t();
-  const plan = state.plan;
-  const hasWindows = Boolean(plan?.fiveHour || plan?.sevenDay);
-  if (!hasWindows) {
+  const limits = statusBarLimitText(state.plan?.windows ?? []);
+  if (!limits) {
     const t7 = state.tokens?.lastSevenDays.totalTokens;
     if (typeof t7 === "number") {
       return `$(hubot) Claude 7d ${compactNumber(t7)} (${T.local})`;
@@ -372,46 +449,15 @@ export function formatClaudeStatusBar(state: ClaudeState): string {
     }
     return "$(warning) Claude";
   }
-  const five = plan?.fiveHour;
-  const seven = plan?.sevenDay;
-  // 남은 % (한도) · 카운트다운은 괄호로 분리. 토큰은 대시보드/툴팁에.
-  const fiveText = five ? `5h ${remainPct(five.utilization)}% (${countdownShort(five.resetsAt)})` : "5h ?";
-  const sevenText = seven ? `7d ${remainPct(seven.utilization)}% (${countdownShort(seven.resetsAt)})` : "7d ?";
-  return `$(hubot) Claude  ${fiveText} · ${sevenText}`;
+  return `$(hubot) Claude  ${limits}`;
 }
 
 export function formatClaudeTooltip(state: ClaudeState): string {
   const T = t();
   const parts: string[] = [];
-  parts.push(
-    state.subscriptionType
-      ? `Claude ${state.subscriptionType}${state.rateLimitTier ? ` (${state.rateLimitTier})` : ""}`
-      : T.claudeCredsMissing,
-  );
-  const plan = state.plan;
-  if (plan?.fiveHour) {
-    const u = plan.fiveHour.utilization;
-    parts.push(`${T.fiveHourLimit}: ${gaugeBar(u)} ${T.remainResetsIn(remainPct(u), countdownLong(plan.fiveHour.resetsAt), formatResetIso(plan.fiveHour.resetsAt))}`);
-  }
-  if (plan?.sevenDay) {
-    const u = plan.sevenDay.utilization;
-    parts.push(`${T.sevenDayLimit}: ${gaugeBar(u)} ${T.remainResetsIn(remainPct(u), countdownLong(plan.sevenDay.resetsAt), formatResetIso(plan.sevenDay.resetsAt))}`);
-  }
-  if (plan?.sevenDayOpus) {
-    const u = plan.sevenDayOpus.utilization;
-    parts.push(`${T.weeklyOpus}: ${gaugeBar(u)} ${remainPct(u)}% ${T.remaining}`);
-  }
-  if (plan?.sevenDaySonnet) {
-    const u = plan.sevenDaySonnet.utilization;
-    parts.push(`${T.weeklySonnet}: ${gaugeBar(u)} ${remainPct(u)}% ${T.remaining}`);
-  }
-  const proj = state.projection;
-  if (proj?.fiveHour?.reaches) {
-    parts.push(`${T.fiveHourEta}: ${formatHours(proj.fiveHour.hoursToFull ?? 0)} ${T.after}`);
-  }
-  if (proj?.sevenDay?.reaches) {
-    parts.push(`${T.sevenDayEta}: ${formatHours(proj.sevenDay.hoursToFull ?? 0)} ${T.after}`);
-  }
+  const planText = claudePlanText(state);
+  parts.push(planText ? `Claude ${planText}` : T.claudeCredsMissing);
+  parts.push(...tooltipLimitLines(state.plan?.windows ?? [], state.projection, state.planDisplayName ?? state.subscriptionType));
   const tok = state.tokens;
   if (tok) {
     parts.push(`${T.recent5hTokens}: ${tok.lastFiveHours.totalTokens.toLocaleString()} ($${tok.lastFiveHours.costUsd.toFixed(2)})`);
@@ -456,19 +502,6 @@ function gaugeBar(used: number | null | undefined, cells = 10): string {
   return "█".repeat(full) + (half ? "▌" : "") + "░".repeat(empty);
 }
 
-/** ISO reset 시각 → 표시 문자열 (Claude용; Codex는 formatReset(unix초) 사용). */
-function formatResetIso(iso: string | null | undefined): string {
-  return iso ? new Date(iso).toLocaleString() : t().unknown;
-}
-
-function formatCodexWindowName(window: RateLimitSnapshot["primary"], fallback: string): string {
-  const T = t();
-  const mins = Number(window?.windowDurationMins || 0);
-  if (mins > 0 && mins <= 360) return T.fiveHourLimit;
-  if (mins >= 6 * 24 * 60) return T.sevenDayLimit;
-  return fallback;
-}
-
 function compactNumber(value: number): string {
   if (value >= 1_000_000) {
     return `${(value / 1_000_000).toFixed(1)}M`;
@@ -479,9 +512,9 @@ function compactNumber(value: number): string {
   return String(value);
 }
 
-function countdownShort(iso: string | null | undefined): string {
-  if (!iso) return "?";
-  const ms = new Date(iso).getTime() - Date.now();
+function countdownShort(atMs: number | null | undefined): string {
+  if (!atMs) return "?";
+  const ms = atMs - Date.now();
   if (!isFinite(ms) || ms <= 0) return t().soon;
   const m = Math.floor(ms / 60000);
   const d = Math.floor(m / 1440);
@@ -492,10 +525,10 @@ function countdownShort(iso: string | null | undefined): string {
   return `${mm}m`;
 }
 
-function countdownLong(iso: string | null | undefined): string {
+function countdownLong(atMs: number | null | undefined): string {
   const T = t();
-  if (!iso) return T.unknown;
-  const ms = new Date(iso).getTime() - Date.now();
+  if (!atMs) return T.unknown;
+  const ms = atMs - Date.now();
   if (!isFinite(ms) || ms <= 0) return T.soon;
   const m = Math.floor(ms / 60000);
   const d = Math.floor(m / 1440);
@@ -504,20 +537,6 @@ function countdownLong(iso: string | null | undefined): string {
   if (d > 0) return T.dh(d, h);
   if (h > 0) return T.hm(h, mm);
   return T.m(mm);
-}
-
-function countdownShortUnix(seconds: number | null | undefined): string {
-  if (!seconds) return "?";
-  return countdownShort(new Date(seconds * 1000).toISOString());
-}
-
-function countdownLongUnix(seconds: number | null | undefined): string {
-  if (!seconds) return t().unknown;
-  return countdownLong(new Date(seconds * 1000).toISOString());
-}
-
-function formatReset(resetsAt: number | null | undefined): string {
-  return resetsAt ? new Date(resetsAt * 1000).toLocaleString() : t().unknown;
 }
 
 function formatHours(hours: number): string {

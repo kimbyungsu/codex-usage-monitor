@@ -8,7 +8,8 @@ import * as https from "https";
 import * as os from "os";
 import * as path from "path";
 import * as tls from "tls";
-import { ClaudeCredentials, ClaudePlanUsage, UsageWindow } from "./claudeTypes";
+import { ClaudeCredentials, ClaudePlanUsage } from "./claudeTypes";
+import { LimitWindow, spanFromMeter } from "./limits";
 
 // OS 신뢰 인증서 저장소(사내 백신/프록시 루트 포함)를 Node 기본 번들과 합쳐
 // 둔다. 이렇게 하면 TLS 가로채기 환경에서도 인증서 검증을 *끄지 않고* 정상
@@ -102,6 +103,45 @@ export function readCredentials(configDir: string): ClaudeCredentials | undefine
   }
 }
 
+// 요금제 표시명: Claude Code CLI가 OAuth 프로필(organization.plan_display_name)을 받아
+// 전역 설정(.claude.json)의 oauthAccount.planDisplayName 에 캐시한다. 내부 식별자
+// (subscriptionType/rateLimitTier)는 요금제가 개명돼도 그대로일 수 있어 표시명은 이것을 쓴다.
+let planNameCache: { file: string; mtimeMs: number; size: number; value: string | null } | undefined;
+
+function globalConfigCandidates(configDir: string): string[] {
+  const out = [path.join(configDir, ".claude.json")];
+  // 기본 설정 폴더(~/.claude)면 CLI는 홈의 ~/.claude.json 을 쓴다.
+  if (path.resolve(configDir) === path.resolve(os.homedir(), ".claude")) {
+    out.push(path.join(os.homedir(), ".claude.json"));
+  }
+  return out;
+}
+
+export function readPlanDisplayName(configDir: string): string | null {
+  for (const file of globalConfigCandidates(configDir)) {
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(file);
+    } catch {
+      continue;
+    }
+    if (planNameCache && planNameCache.file === file && planNameCache.mtimeMs === stat.mtimeMs && planNameCache.size === stat.size) {
+      return planNameCache.value;
+    }
+    let value: string | null = null;
+    try {
+      const raw = JSON.parse(fs.readFileSync(file, "utf8")) as { oauthAccount?: { planDisplayName?: unknown } };
+      const name = raw?.oauthAccount?.planDisplayName;
+      value = typeof name === "string" && name.trim() ? name.trim() : null;
+    } catch {
+      value = null;
+    }
+    planNameCache = { file, mtimeMs: stat.mtimeMs, size: stat.size, value };
+    return value;
+  }
+  return null;
+}
+
 interface HttpResult {
   status: number;
   body: string;
@@ -148,24 +188,95 @@ function isCertError(error: unknown): boolean {
   );
 }
 
-function normalizeWindow(raw: unknown): UsageWindow | null {
-  if (!raw || typeof raw !== "object") {
+function parseIsoMs(value: unknown): number | null {
+  if (typeof value !== "string" || !value) {
     return null;
   }
-  const obj = raw as { utilization?: number; resets_at?: string | null };
-  if (typeof obj.utilization !== "number") {
-    return null;
-  }
-  return { utilization: obj.utilization, resetsAt: obj.resets_at ?? null };
+  const ms = Date.parse(value);
+  return isFinite(ms) ? ms : null;
 }
 
-function normalizeUsage(raw: any): ClaudePlanUsage {
+function meterId(kind: string, scope: string | null): string {
+  return scope ? `${kind}:${scope.toLowerCase()}` : kind;
+}
+
+/** limits[] 한 행(서버 미터) → 창. 분류는 라벨이 아니라 kind/group 으로(서버 계약). */
+function windowFromMeter(row: any): LimitWindow | null {
+  if (!row || typeof row !== "object") {
+    return null;
+  }
+  const percent = row.percent;
+  if (typeof percent !== "number" || !isFinite(percent)) {
+    return null;
+  }
+  const kind = typeof row.kind === "string" && row.kind ? row.kind : null;
+  const group = typeof row.group === "string" && row.group ? row.group : null;
+  const scopeName = row.scope?.model?.display_name ?? row.scope?.surface?.display_name;
+  const scope = typeof scopeName === "string" && scopeName.trim() ? scopeName.trim() : null;
+  return {
+    id: meterId(kind ?? group ?? "limit", scope),
+    span: spanFromMeter(kind, group),
+    kind,
+    scope,
+    usedPercent: percent,
+    resetsAtMs: parseIsoMs(row.resets_at),
+    severity: typeof row.severity === "string" && row.severity ? row.severity : null,
+    headline: row.is_active === true,
+  };
+}
+
+// 구버전 고정 필드 → 같은 창의 미터 정체(kind/범위). limits[]를 모르는 서버이거나
+// limits[]에 빠진 창만 보충하고, 같은 창이면 limits[] 행을 우선한다.
+const LEGACY_FIELDS: Array<{ field: string; kind: string; scope: string | null }> = [
+  { field: "five_hour", kind: "session", scope: null },
+  { field: "seven_day", kind: "weekly_all", scope: null },
+  { field: "seven_day_opus", kind: "weekly_scoped", scope: "Opus" },
+  { field: "seven_day_sonnet", kind: "weekly_scoped", scope: "Sonnet" },
+];
+
+function normalizeWindows(raw: any): LimitWindow[] {
+  const windows: LimitWindow[] = [];
+  const seen = new Set<string>();
+  // 1) 서버의 구조화된 미터 목록 — 어떤 창이 적용되는지·순서·범위·심각도는 서버가 정한다.
+  if (Array.isArray(raw?.limits)) {
+    for (const row of raw.limits) {
+      const w = windowFromMeter(row);
+      if (w && !seen.has(w.id)) {
+        seen.add(w.id);
+        windows.push(w);
+      }
+    }
+  }
+  // 2) 구버전 고정 필드(값이 null 이면 그 창은 이 계정에 현재 미적용).
+  for (const { field, kind, scope } of LEGACY_FIELDS) {
+    const obj = raw?.[field];
+    const id = meterId(kind, scope);
+    if (seen.has(id) || !obj || typeof obj.utilization !== "number") {
+      continue;
+    }
+    seen.add(id);
+    const w: LimitWindow = {
+      id,
+      span: spanFromMeter(kind, null),
+      kind,
+      scope,
+      usedPercent: obj.utilization,
+      resetsAtMs: parseIsoMs(obj.resets_at),
+    };
+    // 계정 전체 5시간 창은 맨 앞(서버 목록에 없을 때도 기존 표시 순서 유지).
+    if (kind === "session" && !scope) {
+      windows.unshift(w);
+    } else {
+      windows.push(w);
+    }
+  }
+  return windows;
+}
+
+export function normalizeUsage(raw: any): ClaudePlanUsage {
   const extra = raw?.extra_usage ?? {};
   return {
-    fiveHour: normalizeWindow(raw?.five_hour),
-    sevenDay: normalizeWindow(raw?.seven_day),
-    sevenDayOpus: normalizeWindow(raw?.seven_day_opus),
-    sevenDaySonnet: normalizeWindow(raw?.seven_day_sonnet),
+    windows: normalizeWindows(raw),
     extraUsage: {
       isEnabled: Boolean(extra.is_enabled),
       utilization: extra.utilization ?? null,
@@ -263,7 +374,7 @@ function parseRetryAfterMs(headers: Record<string, string | string[] | undefined
   return 60_000; // 헤더 없으면 기본 60초
 }
 
-/** 플랜 한도(5시간/주간)를 가져온다. 필요 시 토큰을 갱신한다. */
+/** 플랜 한도(서버가 보고하는 창 전부)를 가져온다. 필요 시 토큰을 갱신한다. */
 export async function fetchPlanUsage(options: ClaudeApiOptions): Promise<PlanFetchResult> {
   const configDir = resolveConfigDir(options.configDirOverride);
   let creds = readCredentials(configDir);

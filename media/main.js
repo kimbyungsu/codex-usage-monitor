@@ -120,19 +120,29 @@
 
   // ---------- Claude ----------
   function renderClaude(s) {
-    claudePlan.textContent = s.subscriptionType ? (s.subscriptionType + (s.rateLimitTier ? " · " + s.rateLimitTier : "")) : S.notConnected;
-    const plan = s.plan || {};
+    // 요금제: 서버 표시명(개명 반영) 우선, 내부 식별자는 마우스 오버로.
+    claudePlan.textContent = s.planDisplayName || s.subscriptionType || S.notConnected;
+    claudePlan.title = s.planText || "";
     const tok = s.tokens || {};
     const cards = [];
-    const proj = s.projection || {};
     // 429는 알림 카드가 아니라 상단의 작고 차분한 상태 문구로만 표시.
     if (s.planRateLimited) {
       cards.push('<div class="sub" style="grid-column:1/-1;margin:0">⏳ ' + escapeHtml(s.planRateLimited) + "</div>");
     }
-    cards.push(windowCard(S.fiveHourLimit, plan.fiveHour, tok.lastFiveHours, proj.fiveHour, sparkSvg(s.samples, "five", plan.fiveHour)));
-    cards.push(windowCard(S.weeklyLimit, plan.sevenDay, tok.lastSevenDays, proj.sevenDay, sparkSvg(s.samples, "seven", plan.sevenDay)));
-    if (plan.sevenDayOpus) cards.push(windowCard(S.weeklyOpusLimit, plan.sevenDayOpus, null));
-    if (plan.sevenDaySonnet) cards.push(windowCard(S.weeklySonnetLimit, plan.sevenDaySonnet, null));
+    // 서버가 보고한 한도 창만 그린다(5시간 창이 없는 플랜·시기면 그 카드는 없고 안내 한 줄).
+    const windows = (s.plan && s.plan.windows) || [];
+    windows.forEach((w) => {
+      const bucket = localBucketFor(w, tok);
+      const tokenLine = bucket
+        ? '<div class="sub">' + S.thisPcTokens + " " + compact(bucket.totalTokens) + " · $" + money(bucket.costUsd) + "</div>"
+        : "";
+      cards.push(limitWindowCard(w, tokenLine, (s.projection || {})[w.id], (s.samples || {})[w.id], false));
+    });
+    if (!s.plan) {
+      cards.push(card(S.planLimitsCard, '<div class="value muted">' + S.noLimitInfo + "</div>"));
+    }
+    const noFive = noFiveHourNote(windows);
+    if (noFive) cards.push(noFive);
     cards.push(card(S.sessionCard, sessionHtml(tok, s)));
     cards.push(card(S.costCard, costHtml(tok)));
     cards.push(card(S.trendCard, trendHtml(tok.insights), "wide"));
@@ -150,25 +160,46 @@
     claudeRoot.innerHTML = cards.join("");
   }
 
-  function windowCard(title, win, tokenBucket, proj, spark) {
-    if (!win) {
-      return card(title, '<div class="value muted">' + S.notApplicable + "</div>");
-    }
-    const used = Number(win.utilization || 0);
-    const cls = used >= 90 ? "danger" : used >= 70 ? "warn" : "";
-    const reset = win.resetsAt ? S.resetsUntil + " " + countdown(win.resetsAt) + " (" + new Date(win.resetsAt).toLocaleString() + ")" : S.noResetTime;
-    const tokenLine = tokenBucket
-      ? '<div class="sub">' + S.thisPcTokens + " " + compact(tokenBucket.totalTokens) + " · $" + money(tokenBucket.costUsd) + "</div>"
-      : "";
+  // ---------- 한도 창 카드 (Claude·Codex 공통) ----------
+
+  /** 같은 시간폭의 이 PC 로컬 토큰 구간. 모델 전용 창이나 대응 구간이 없는 창은 null. */
+  function localBucketFor(w, buckets) {
+    if (!buckets || w.scope) return null;
+    if (w.span === "5h") return buckets.lastFiveHours || null;
+    if (w.span === "weekly") return buckets.lastSevenDays || null;
+    return null;
+  }
+
+  /** 막대 색: 서버 심각도가 있으면 그대로(클라이언트가 재판정하지 않음), 없으면 사용률 70/90%. */
+  function barClass(w, used) {
+    const sev = String(w.severity || "").toLowerCase();
+    if (sev === "critical") return "danger";
+    if (sev === "warning") return "warn";
+    if (sev === "normal") return "";
+    return used >= 90 ? "danger" : used >= 70 ? "warn" : "";
+  }
+
+  function limitWindowCard(w, tokenLine, proj, series, showDuration) {
+    const used = Number(w.usedPercent || 0);
+    const reset = w.resetsAtMs
+      ? S.resetsUntil + " " + countdown(w.resetsAtMs) + " (" + new Date(w.resetsAtMs).toLocaleString() + ")"
+      : S.noResetTime;
+    const duration = showDuration && w.windowMins ? " · " + formatDuration(w.windowMins) : "";
     const projLine = proj
       ? (proj.reaches
           ? '<div class="sub">' + S.byTrend + " " + projText(proj) + "</div>"
           : '<div class="sub">' + S.noReachWindow + "</div>")
       : "";
-    return card(title,
+    return card(w.label || S.limitFallback,
       '<div class="row"><div class="value">' + used + S.usedSuffix + "</div></div>" +
-      '<div class="bar"><div class="fill ' + cls + '" style="width:' + clamp(used, 0, 100) + '%"></div></div>' +
-      '<div class="sub">' + escapeHtml(reset) + "</div>" + tokenLine + projLine + (spark || ""));
+      '<div class="bar"><div class="fill ' + barClass(w, used) + '" style="width:' + clamp(used, 0, 100) + '%"></div></div>' +
+      '<div class="sub">' + escapeHtml(reset + duration) + "</div>" + tokenLine + projLine + sparkSvg(series));
+  }
+
+  /** 서버가 창은 보고하는데 계정 전체 5시간 창이 없으면 그 사실을 한 줄로(카드 자리를 비워두지 않음). */
+  function noFiveHourNote(windows) {
+    if (!windows.length || windows.some((w) => w.span === "5h" && !w.scope)) return "";
+    return '<div class="sub" style="grid-column:1/-1;margin:0">ⓘ ' + escapeHtml(S.noFiveHourNote) + "</div>";
   }
 
   function projText(proj) {
@@ -240,11 +271,22 @@
     const token = state.tokenUsage && state.tokenUsage.tokenUsage;
     const account = state.account;
     const history = state.history || {};
-    const proj = state.projection || {};
+    // 서버가 보고한 창을 길이로 분류한 목록(primary/secondary 위치와 무관). 없는 창은 그리지 않는다.
+    const windows = state.limits || [];
+    const limitCards = windows.map((w) => {
+      const bucket = localBucketFor(w, history);
+      const tokenLine = bucket
+        ? '<div class="sub">' + S.sameWindowLocal + " " + compact(bucket.totalTokens) + " " + S.tokensUnit + "</div>"
+        : "";
+      return limitWindowCard(w, tokenLine, (state.projection || {})[w.id], (state.samples || {})[w.id], true);
+    });
+    if (!windows.length) {
+      limitCards.push(card(S.planLimitsCard, '<div class="value muted">' + S.noLimitInfo + '</div><div class="sub">' + S.noLimitSub + "</div>"));
+    }
     root.innerHTML = [
       card(S.account, accountHtml(account, state)),
-      limitCard(codexLimitTitle(limit.primary, S.fiveHourLimit), limit.primary, history.lastFiveHours, proj.primary, sparkSvgUnix(state.samples, "primary")),
-      limitCard(codexLimitTitle(limit.secondary, S.sevenDayLimitCodex), limit.secondary, history.lastSevenDays, proj.secondary, sparkSvgUnix(state.samples, "secondary")),
+      ...limitCards,
+      noFiveHourNote(windows),
       card(S.sessionCard, codexSessionHtml(token, history, state)),
       card(S.trendCard, trendHtml(history.insights), "wide"),
       card(S.turnsCard, turnsHtml(history.insights, false), "wide"),
@@ -270,34 +312,9 @@
   function accountHtml(account, state) {
     if (!account) return '<div class="value">' + S.noAccount + '</div><div class="muted">requiresOpenaiAuth: ' + Boolean(state.requiresOpenaiAuth) + "</div>";
     const email = account.email ? '<div class="muted">' + escapeHtml(account.email) + "</div>" : "";
-    return '<div class="value">' + escapeHtml(account.planType || account.type || "Unknown") + "</div>" + email;
-  }
-  function codexLimitTitle(win, fallback) {
-    const mins = Number((win && win.windowDurationMins) || 0);
-    if (mins > 0 && mins <= 360) return S.fiveHourLimit;
-    if (mins >= 6 * 24 * 60) return S.sevenDayLimitCodex;
-    return fallback;
-  }
-  function limitCard(title, win, tokenBucket, proj, spark) {
-    if (!win) return card(title, '<div class="value muted">' + S.noLimitInfo + '</div><div class="sub">' + S.noLimitSub + "</div>");
-    const used = Number(win.usedPercent || 0);
-    const cls = used >= 90 ? "danger" : used >= 70 ? "warn" : "";
-    const reset = win.resetsAt
-      ? S.resetsUntil + " " + countdownUnix(win.resetsAt) + " (" + new Date(win.resetsAt * 1000).toLocaleString() + ")"
-      : S.noResetTime;
-    const duration = win.windowDurationMins ? " · " + formatDuration(win.windowDurationMins) : "";
-    const tokenLine = tokenBucket
-      ? '<div class="sub">' + S.sameWindowLocal + " " + compact(tokenBucket.totalTokens) + " " + S.tokensUnit + "</div>"
-      : "";
-    const projLine = proj
-      ? (proj.reaches
-          ? '<div class="sub">' + S.byTrend + " " + projText(proj) + "</div>"
-          : '<div class="sub">' + S.noReachWindow + "</div>")
-      : "";
-    return card(title,
-      '<div class="row"><div class="value">' + used + S.usedSuffix + "</div></div>" +
-      '<div class="bar"><div class="fill ' + cls + '" style="width:' + clamp(used, 0, 100) + '%"></div></div>' +
-      '<div class="sub">' + escapeHtml(reset + duration) + "</div>" + tokenLine + projLine + (spark || ""));
+    // 요금제: 공식 표기(예: 내부 식별자 → 표시명), 원문 식별자는 마우스 오버로.
+    const plan = state.planLabel || account.planType || account.type || "Unknown";
+    return '<div class="value" title="' + escapeHtml(account.planType || "") + '">' + escapeHtml(plan) + "</div>" + email;
   }
   function creditsHtml(limit) {
     const credits = limit.credits;
@@ -601,15 +618,11 @@
     return '<div class="sub" style="margin-top:0">' + S.heatmapNote + '</div><div class="hm">' + cells + "</div>" + legend;
   }
 
-  /** 한도 사용률 스파크라인(Claude: ISO 윈도우 키 five/seven). 점선 = 현재 추세 연장. */
-  function sparkSvg(samples, key) {
-    const pts = (samples || []).filter((s) => typeof s[key] === "number");
+  /** 한도 사용률 스파크라인(창 하나의 시계열 [{ts, v}]). 점선 = 현재 추세 연장. */
+  function sparkSvg(series) {
+    const pts = (series || []).filter((p) => typeof p.v === "number");
     if (pts.length < 2) return "";
-    return sparkCore(pts.map((p) => ({ ts: p.ts, v: p[key] })));
-  }
-  /** Codex(키 primary/secondary)용 — 데이터 구조 동일. */
-  function sparkSvgUnix(samples, key) {
-    return sparkSvg(samples, key);
+    return sparkCore(pts);
   }
   function sparkCore(pts) {
     const W = 240, H = 44, P = 4;
@@ -650,18 +663,14 @@
     if (minutes >= 60) return Math.round(minutes / 60) + S.hourWindow;
     return minutes + S.minWindow;
   }
-  function countdown(iso) {
-    const ms = new Date(iso).getTime() - Date.now();
+  function countdown(atMs) {
+    const ms = Number(atMs) - Date.now();
     if (!isFinite(ms) || ms <= 0) return S.soon;
     const m = Math.floor(ms / 60000);
     const d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), mm = m % 60;
     if (d > 0) return d + S.dayN + " " + h + S.hourN;
     if (h > 0) return h + S.hourN + " " + mm + S.minN;
     return mm + S.minN;
-  }
-  function countdownUnix(seconds) {
-    if (!seconds) return S.soon;
-    return countdown(new Date(seconds * 1000).toISOString());
   }
   function compact(value) {
     const v = Number(value || 0);

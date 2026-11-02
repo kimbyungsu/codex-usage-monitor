@@ -18,11 +18,14 @@ Module._resolveFilename = function (request, ...rest) {
 };
 
 const { ClaudeService } = require("../out/claudeService.js");
+const { normalizeUsage } = require("../out/claudeApi.js");
 const { readCodexHistory } = require("../out/codexHistory.js");
-const { webviewStrings } = require("../out/i18n.js");
+const { windowsFromCodex } = require("../out/limits.js");
+const { limitLabel, t, webviewStrings } = require("../out/i18n.js");
 
 const root = path.join(__dirname, "..");
-const docsDir = path.join(root, "docs");
+// SHOT_DIR: 검증용으로 docs 대신 다른 폴더에 하니스를 쓰고 싶을 때.
+const docsDir = process.env.SHOT_DIR || path.join(root, "docs");
 fs.mkdirSync(docsDir, { recursive: true });
 
 const now = Date.now();
@@ -39,20 +42,18 @@ function anonymizeThreads(list) {
   });
 }
 
-// ---- 한도 샘플(스파크라인용 가상 추세) ----
-function ramp(keyA, fromA, toA, keyB, fromB, toB, minutes = 100, n = 14) {
+// ---- 한도 샘플(스파크라인용 가상 추세: 창 하나의 [{ts, v}]) ----
+function ramp(from, to, amp = 0.8, minutes = 100, n = 14) {
   const out = [];
   for (let i = 0; i < n; i++) {
     const f = i / (n - 1);
-    const wobble = Math.sin(i * 1.7) * 0.8;
-    out.push({
-      ts: now - (minutes - f * minutes) * 60_000,
-      [keyA]: Math.max(0, fromA + (toA - fromA) * f + wobble),
-      [keyB]: Math.max(0, fromB + (toB - fromB) * f + wobble * 0.4),
-    });
+    out.push({ ts: now - (minutes - f * minutes) * 60_000, v: Math.max(0, from + (to - from) * f + Math.sin(i * 1.7) * amp) });
   }
   return out;
 }
+
+// 대시보드가 받는 것과 같게 창마다 표시 라벨을 붙인다(Dashboard.postState 와 동일).
+const withLabels = (windows) => windows.map((w) => ({ ...w, label: limitLabel(w, t("ko")) }));
 
 // ---- Claude 상태 (토큰·차트 = 실데이터, 한도 = 가상) ----
 const svc = new ClaudeService({ appendLine() {} });
@@ -62,17 +63,25 @@ const claudeState = {
   available: true,
   connecting: false,
   subscriptionType: "max",
-  rateLimitTier: "20x",
-  plan: {
-    fiveHour: { utilization: 56, resetsAt: new Date(now + 165 * 60_000).toISOString() },
-    sevenDay: { utilization: 64, resetsAt: new Date(now + 3.4 * DAY).toISOString() },
-  },
+  rateLimitTier: "default_claude_max_5x",
+  planDisplayName: "Max",
+  planText: "Max (max · default_claude_max_5x)",
+  // 실제 usage 응답 형태(limits[] 미터)를 정규화 경로 그대로 통과시킨다.
+  plan: (() => {
+    const plan = normalizeUsage({
+      limits: [
+        { kind: "session", group: "session", percent: 56, severity: "normal", resets_at: new Date(now + 165 * 60_000).toISOString(), scope: null, is_active: true },
+        { kind: "weekly_all", group: "weekly", percent: 64, severity: "normal", resets_at: new Date(now + 3.4 * DAY).toISOString(), scope: null, is_active: false },
+      ],
+    });
+    return { ...plan, windows: withLabels(plan.windows) };
+  })(),
   tokens,
   projection: {
-    fiveHour: { reaches: true, hoursToFull: 2.3, etaMs: now + 2.3 * HOUR },
-    sevenDay: { reaches: false },
+    session: { reaches: true, hoursToFull: 2.3, etaMs: now + 2.3 * HOUR },
+    weekly_all: { reaches: false },
   },
-  samples: ramp("five", 34, 56, "seven", 58, 64),
+  samples: { session: ramp(34, 56), weekly_all: ramp(58, 64, 0.3) },
   lastPlanRefresh: now,
   lastTokenRefresh: now,
 };
@@ -84,15 +93,16 @@ const codexState = {
   connected: true,
   connecting: false,
   account: { type: "chatgpt", email: "user@example.com", planType: "plus" },
+  planLabel: "Plus",
   rateLimits: {
     primary: { usedPercent: 37, resetsAt: Math.floor((now + 2.1 * HOUR) / 1000), windowDurationMins: 300 },
     secondary: { usedPercent: 61, resetsAt: Math.floor((now + 4.2 * DAY) / 1000), windowDurationMins: 10080 },
   },
   projection: {
-    primary: { reaches: true, hoursToFull: 1.8, etaMs: now + 1.8 * HOUR },
-    secondary: { reaches: false },
+    "codex:5h": { reaches: true, hoursToFull: 1.8, etaMs: now + 1.8 * HOUR },
+    "codex:weekly": { reaches: false },
   },
-  samples: ramp("primary", 22, 37, "secondary", 55, 61),
+  samples: { "codex:5h": ramp(22, 37), "codex:weekly": ramp(55, 61, 0.3) },
   tokenUsage: {
     threadId: "session-01",
     turnId: "turn-08",
@@ -106,6 +116,7 @@ const codexState = {
   lastRefresh: now,
   lastHistoryScanOkAt: now,
 };
+codexState.limits = withLabels(windowsFromCodex(codexState.rateLimits, null));
 
 // ---- HTML 하니스 생성 ----
 const css = fs.readFileSync(path.join(root, "media", "dashboard.css"), "utf8");

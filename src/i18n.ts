@@ -1,6 +1,7 @@
 // 다국어(EN/KO). 표시 언어는 설정(codexUsageMonitor.language) 또는
 // VS Code 표시 언어(vscode.env.language)를 따른다.
 import * as vscode from "vscode";
+import { LimitSpan, LimitWindow } from "./limits";
 
 export type Lang = "en" | "ko";
 
@@ -26,19 +27,23 @@ interface TsStrings {
   last7dLocal: string;
   scopeShort: string;
   error: string;
-  fiveHourLimit: string;
-  sevenDayLimit: string;
+  // 한도 창 라벨(서버가 보고한 창의 길이/종류로 결정)
+  spanLimit: Record<Exclude<LimitSpan, "other">, string>;
+  durationLimit: (duration: string) => string;
+  nDays: (n: number) => string;
+  nHours: (n: number) => string;
+  nMinutes: (n: number) => string;
+  genericLimit: string;
+  limitEta: (label: string) => string;
+  noFiveHour: (plan: string | null) => string;
+  noneShort: string;
   usedResetsIn: (pct: number, cd: string, at: string) => string;
   remainResetsIn: (pct: number, cd: string, at: string) => string;
+  remainNoReset: (pct: number) => string;
   // Claude 툴팁
   claudeCredsMissing: string;
   used: string;
-  remaining: string;
   resetsIn: string;
-  fiveHourEta: string;
-  sevenDayEta: string;
-  weeklyOpus: string;
-  weeklySonnet: string;
   recent5hTokens: string;
   recent7dTokens: string;
   currentSession: string;
@@ -50,8 +55,6 @@ interface TsStrings {
   rateLimited: (secs: number) => string;
   // 알림 / 시작
   alert: (label: string, pct: number, top: number, reset: string) => string;
-  alertFiveHour: string;
-  alertWeekly: string;
   startupNotice: string;
   openDashboard: string;
   pathNotExist: (p: string) => string;
@@ -80,18 +83,22 @@ const KO: TsStrings = {
   last7dLocal: "최근 7일 로컬 토큰",
   scopeShort: "한도는 계정 전체(서버), 토큰·모델은 이 PC 로컬 기준",
   error: "오류",
-  fiveHourLimit: "5시간 한도",
-  sevenDayLimit: "7일 한도",
+  spanLimit: { "5h": "5시간 한도", daily: "일일 한도", weekly: "주간 한도", monthly: "월간 한도", annual: "연간 한도" },
+  durationLimit: (d) => `${d} 한도`,
+  nDays: (n) => `${n}일`,
+  nHours: (n) => `${n}시간`,
+  nMinutes: (n) => `${n}분`,
+  genericLimit: "사용 한도",
+  limitEta: (label) => `${label} 소진 예상`,
+  noFiveHour: (plan) =>
+    `5시간 한도: 없음 — 현재 ${plan ? `${plan} 요금제에` : "이 계정에"} 적용되지 않음 (다시 적용되면 자동 표시)`,
+  noneShort: "없음",
   usedResetsIn: (pct, cd, at) => `${pct}% 사용, 리셋까지 ${cd} (${at})`,
   remainResetsIn: (pct, cd, at) => `${pct}% 남음, 리셋까지 ${cd} (${at})`,
+  remainNoReset: (pct) => `${pct}% 남음`,
   claudeCredsMissing: "Claude 자격증명 미확인",
   used: "사용",
-  remaining: "남음",
   resetsIn: "리셋까지",
-  fiveHourEta: "5시간 소진 예상",
-  sevenDayEta: "주간 소진 예상",
-  weeklyOpus: "주간 Opus",
-  weeklySonnet: "주간 Sonnet",
   recent5hTokens: "최근 5시간 토큰",
   recent7dTokens: "최근 7일 토큰",
   currentSession: "현재 세션",
@@ -102,9 +109,7 @@ const KO: TsStrings = {
   rateLimited: (secs) =>
     `사용량 서버가 잠시 제한 중입니다 · 마지막 값 표시 · 다음 시도 약 ${secs}초 후`,
   alert: (label, pct, top, reset) =>
-    `Claude ${label} 한도 ${pct}% 도달 (임계치 ${top}%)${reset ? ` · 리셋 ${reset}` : ""}`,
-  alertFiveHour: "5시간",
-  alertWeekly: "주간",
+    `Claude ${label} ${pct}% 도달 (임계치 ${top}%)${reset ? ` · 리셋 ${reset}` : ""}`,
   startupNotice: "AI 에이전트 사용량 모니터가 시작되었습니다. 왼쪽 상태바의 Codex/Claude 항목을 누르면 대시보드가 열립니다.",
   openDashboard: "대시보드 열기",
   pathNotExist: (p) => `경로가 존재하지 않지만 추가합니다: ${p}`,
@@ -132,18 +137,22 @@ const EN: TsStrings = {
   last7dLocal: "Last 7d local tokens",
   scopeShort: "Limits are account-wide (server); tokens/models are this PC's local logs",
   error: "Error",
-  fiveHourLimit: "5-hour limit",
-  sevenDayLimit: "Weekly limit",
+  spanLimit: { "5h": "5-hour limit", daily: "Daily limit", weekly: "Weekly limit", monthly: "Monthly limit", annual: "Annual limit" },
+  durationLimit: (d) => `${d} limit`,
+  nDays: (n) => `${n}-day`,
+  nHours: (n) => `${n}-hour`,
+  nMinutes: (n) => `${n}-minute`,
+  genericLimit: "Usage limit",
+  limitEta: (label) => `${label} ETA`,
+  noFiveHour: (plan) =>
+    `5-hour limit: none — not applied to ${plan ? `the ${plan} plan` : "this account"} right now (shows automatically if re-applied)`,
+  noneShort: "none",
   usedResetsIn: (pct, cd, at) => `${pct}% used, resets in ${cd} (${at})`,
   remainResetsIn: (pct, cd, at) => `${pct}% left, resets in ${cd} (${at})`,
+  remainNoReset: (pct) => `${pct}% left`,
   claudeCredsMissing: "Claude credentials not found",
   used: "used",
-  remaining: "left",
   resetsIn: "resets in",
-  fiveHourEta: "5h limit ETA",
-  sevenDayEta: "Weekly limit ETA",
-  weeklyOpus: "Weekly Opus",
-  weeklySonnet: "Weekly Sonnet",
   recent5hTokens: "Last 5h tokens",
   recent7dTokens: "Last 7d tokens",
   currentSession: "Current session",
@@ -154,9 +163,7 @@ const EN: TsStrings = {
   rateLimited: (secs) =>
     `Usage server is briefly throttling · showing last value · next try in ~${secs}s`,
   alert: (label, pct, top, reset) =>
-    `Claude ${label} usage reached ${pct}% (threshold ${top}%)${reset ? ` · resets ${reset}` : ""}`,
-  alertFiveHour: "5h",
-  alertWeekly: "weekly",
+    `Claude ${label} reached ${pct}% (threshold ${top}%)${reset ? ` · resets ${reset}` : ""}`,
   startupNotice: "AI Agent Usage Monitor started. Click the Codex/Claude item in the left status bar to open the dashboard.",
   openDashboard: "Open dashboard",
   pathNotExist: (p) => `Path does not exist, adding anyway: ${p}`,
@@ -177,6 +184,27 @@ export function t(lang: Lang = resolveLang()): TsStrings {
   return lang === "ko" ? KO : EN;
 }
 
+/**
+ * 한도 창 표시 라벨: 길이 분류 → 그 이름, 길이만 알면 "N시간/N일 한도", 미지의 서버 미터면 종류명.
+ * 모델/표면 전용 창은 서버 표시명을 붙인다(예: "주간 한도 · <모델>").
+ */
+export function limitLabel(w: LimitWindow, T: TsStrings = t()): string {
+  let base: string;
+  if (w.span !== "other") {
+    base = T.spanLimit[w.span];
+  } else if (Number(w.windowMins) > 0) {
+    const mins = Number(w.windowMins);
+    base = T.durationLimit(
+      mins >= 1440 ? T.nDays(Math.round(mins / 1440)) : mins >= 60 ? T.nHours(Math.round(mins / 60)) : T.nMinutes(mins),
+    );
+  } else if (w.kind) {
+    base = w.kind.replace(/_/g, " ");
+  } else {
+    base = T.genericLimit;
+  }
+  return w.scope ? `${base} · ${w.scope}` : base;
+}
+
 // ===== 웹뷰(대시보드) 문자열: JSON 으로 안전하게 주입 =====
 export function webviewStrings(lang: Lang): Record<string, string> {
   const ko: Record<string, string> = {
@@ -194,10 +222,9 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     remove: "삭제",
     noPaths: "추가된 경로 없음 — 이 PC만 집계 중",
     notConnected: "연결 안 됨",
-    fiveHourLimit: "5시간 한도",
-    weeklyLimit: "주간 한도",
-    weeklyOpusLimit: "주간 · Opus 전용한도",
-    weeklySonnetLimit: "주간 · Sonnet 전용한도",
+    planLimitsCard: "사용 한도",
+    limitFallback: "사용 한도",
+    noFiveHourNote: "5시간 한도 없음 — 서버가 현재 이 계정에 주간 등 다른 창만 보고합니다. 요금제·시기에 따라 폐지/부활될 수 있으며, 다시 보고되면 자동으로 표시됩니다.",
     sessionCard: "현재 세션 (이 PC)",
     local7dCard: "최근 7일 로컬 토큰",
     costCard: "비용 (이 PC · 최근 7일·추정)",
@@ -206,7 +233,6 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     tokenAlert: "토큰 집계 알림",
     status: "상태",
     lookingCreds: "Claude 자격증명을 찾는 중…",
-    notApplicable: "미적용",
     noData: "데이터 없음",
     noAgentsDetected: "감지된 에이전트 없음",
     noAgentsHint: "Codex 또는 Claude Code 자격증명/로컬 로그가 감지되면 자동으로 표시됩니다.",
@@ -246,7 +272,6 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     spendLimit: "지출 한도",
     recentTokens: "최근 토큰 사용",
     customCmd: "사용자 지정 명령",
-    sevenDayLimitCodex: "7일 한도",
     noLimitInfo: "한도 정보 없음",
     noLimitSub: "Codex 서버에서 아직 한도 값을 받지 못했습니다.",
     sameWindowLocal: "동일 시간폭 로컬 토큰",
@@ -359,10 +384,9 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     remove: "Remove",
     noPaths: "No paths added — counting this PC only",
     notConnected: "Not connected",
-    fiveHourLimit: "5-hour limit",
-    weeklyLimit: "Weekly limit",
-    weeklyOpusLimit: "Weekly · Opus-only limit",
-    weeklySonnetLimit: "Weekly · Sonnet-only limit",
+    planLimitsCard: "Usage limits",
+    limitFallback: "Usage limit",
+    noFiveHourNote: "No 5-hour limit — the server currently reports only other windows (e.g. weekly) for this account. It may be removed or restored per plan/period, and shows up automatically when reported again.",
     sessionCard: "Current session (this PC)",
     local7dCard: "Last 7d local tokens",
     costCard: "Cost (this PC · last 7d · est.)",
@@ -371,7 +395,6 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     tokenAlert: "Token aggregation notice",
     status: "Status",
     lookingCreds: "Looking for Claude credentials…",
-    notApplicable: "N/A",
     noData: "No data",
     noAgentsDetected: "No detected agents",
     noAgentsHint: "Codex or Claude Code appears automatically when credentials or local logs are detected.",
@@ -410,7 +433,6 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     spendLimit: "Spend limit",
     recentTokens: "Recent token usage",
     customCmd: "Custom command",
-    sevenDayLimitCodex: "Weekly limit",
     noLimitInfo: "No limit data",
     noLimitSub: "No limit values received from the Codex server yet.",
     sameWindowLocal: "Local tokens (same window)",

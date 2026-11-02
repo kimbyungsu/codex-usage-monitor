@@ -5,6 +5,7 @@ import { promisify } from "util";
 import * as vscode from "vscode";
 import { readCodexHistoryAsync } from "./codexHistory";
 import { CodexRpcClient } from "./codexClient";
+import { LimitTrend, mergeRateLimitSnapshot, windowsFromCodex } from "./limits";
 import {
   AccountReadResponse,
   RateLimitsReadResponse,
@@ -15,6 +16,34 @@ import {
 
 const execAsync = promisify(exec);
 
+// 서버는 내부 요금제 식별자만 준다. 표시명은 공식 Codex TUI(codex-rs/tui/src/subscription.rs,
+// Status 표기)와 같게 하고, 목록에 없는 새 식별자는 원문 그대로 보여준다(개명·신설에도 깨지지 않음).
+const CODEX_PLAN_LABELS: Record<string, string> = {
+  free: "Free",
+  go: "Go",
+  plus: "Plus",
+  pro: "Pro 200",
+  prolite: "Pro 100",
+  promax: "Pro 500",
+  team: "Business",
+  self_serve_business_usage_based: "Business",
+  business: "Enterprise",
+  self_serve_business_prolite: "Business Premium",
+  enterprise: "Enterprise",
+  ent26: "Enterprise",
+  enterprise_cbp_usage_based: "Enterprise",
+  enterprise_cbp_automation: "Enterprise (Automation)",
+  edu: "Edu",
+  edu_plus: "Edu Plus",
+  edu_pro: "Edu Pro",
+};
+
+export function codexPlanLabel(planType: string | null | undefined): string | null {
+  const raw = (planType ?? "").trim();
+  if (!raw) return null;
+  return CODEX_PLAN_LABELS[raw.toLowerCase()] ?? raw;
+}
+
 export class UsageService implements vscode.Disposable {
   private client?: CodexRpcClient;
   private serverTimer?: NodeJS.Timeout;
@@ -22,8 +51,10 @@ export class UsageService implements vscode.Disposable {
   private serverBaseMs = 60_000;
   private serverIntervalMs = 60_000;
   private serverFailureCount = 0;
-  /** rate-limit 사용률 추세 추정용 샘플 버퍼 (Claude planSamples와 동일 개념). */
-  private rlSamples: Array<{ ts: number; primary?: number; secondary?: number }> = [];
+  /** 창별 사용률 추세(Claude와 같은 LimitTrend). */
+  private readonly trend = new LimitTrend();
+  /** 희소 갱신 알림으로 창 구성이 바뀐 듯할 때 전체 재조회를 묶는 타이머. */
+  private reshapeTimer?: NodeJS.Timeout;
   private readonly onDidChangeEmitter = new vscode.EventEmitter<UsageState>();
   private state: UsageState = {
     connected: false,
@@ -90,14 +121,17 @@ export class UsageService implements vscode.Disposable {
       this.serverFailureCount = 0;
       this.serverIntervalMs = this.serverBaseMs;
       const sampledAt = Date.now();
-      this.recordRlSample(sampledAt, limits.rateLimits);
+      const windows = windowsFromCodex(limits.rateLimits, limits.rateLimitsByLimitId);
+      this.trend.record(sampledAt, windows);
       this.setState({
         account: account.account,
         requiresOpenaiAuth: account.requiresOpenaiAuth,
+        planLabel: codexPlanLabel(account.account?.planType ?? limits.rateLimits?.planType),
         rateLimits: limits.rateLimits,
         rateLimitsByLimitId: limits.rateLimitsByLimitId,
-        projection: this.computeProjection(sampledAt, limits.rateLimits),
-        samples: [...this.rlSamples],
+        limits: windows,
+        projection: this.trend.projections(sampledAt, windows),
+        samples: this.trend.samples(),
         lastRefresh: sampledAt,
         connected: true,
         connecting: false,
@@ -184,6 +218,9 @@ export class UsageService implements vscode.Disposable {
     if (this.localTimer) {
       clearInterval(this.localTimer);
     }
+    if (this.reshapeTimer) {
+      clearTimeout(this.reshapeTimer);
+    }
     this.client?.dispose();
     this.onDidChangeEmitter.dispose();
   }
@@ -195,10 +232,30 @@ export class UsageService implements vscode.Disposable {
     }
 
     if (method === "account/rateLimits/updated") {
-      const update = params as { rateLimits?: RateLimitSnapshot };
-      if (update.rateLimits) {
-        const merged = mergeRateLimit(this.state.rateLimits, update.rateLimits);
-        this.setState({ rateLimits: merged, lastRefresh: Date.now() });
+      const update = (params as { rateLimits?: RateLimitSnapshot })?.rateLimits;
+      if (!update) {
+        return;
+      }
+      // 버킷(limitId)별로 라우팅: 모델 전용 버킷의 갱신이 기본 버킷 창을 덮어쓰지 않게.
+      const mainId = this.state.rateLimits?.limitId || "codex";
+      const bucket = update.limitId || mainId;
+      if (bucket === mainId) {
+        const { snapshot, shapeChanged } = mergeRateLimitSnapshot(this.state.rateLimits, update);
+        this.setState({
+          rateLimits: snapshot,
+          limits: windowsFromCodex(snapshot, this.state.rateLimitsByLimitId),
+          lastRefresh: Date.now(),
+        });
+        if (shapeChanged) {
+          this.scheduleReshapeRefresh();
+        }
+      } else {
+        const byId = { ...(this.state.rateLimitsByLimitId ?? {}) };
+        byId[bucket] = mergeRateLimitSnapshot(byId[bucket], update).snapshot;
+        this.setState({
+          rateLimitsByLimitId: byId,
+          limits: windowsFromCodex(this.state.rateLimits, byId),
+        });
       }
       return;
     }
@@ -227,57 +284,18 @@ export class UsageService implements vscode.Disposable {
     }
   }
 
-  /** 사용률 추세 샘플 기록(리셋으로 급락 시 버퍼 초기화). Claude recordSample와 동일 개념. */
-  private recordRlSample(now: number, rl?: RateLimitSnapshot | null): void {
-    if (!rl) {
-      return;
+  /**
+   * 희소 갱신에 직전에 없던 창이 왔다 = 창 구성이 바뀌었을 수 있음(예: 5시간 창 폐지/부활).
+   * 희소 갱신만으로는 '사라진 창'을 알 수 없으므로 곧바로 전체 스냅샷을 다시 읽어 확정한다.
+   */
+  private scheduleReshapeRefresh(): void {
+    if (this.reshapeTimer) {
+      clearTimeout(this.reshapeTimer);
     }
-    const primary = rl.primary?.usedPercent;
-    const secondary = rl.secondary?.usedPercent;
-    const last = this.rlSamples[this.rlSamples.length - 1];
-    if (last && typeof primary === "number" && typeof last.primary === "number" && primary < last.primary - 5) {
-      this.rlSamples = []; // 사용률 급락 = 윈도우 리셋 → 이전 추세 폐기
-    }
-    this.rlSamples.push({ ts: now, primary, secondary });
-    const cutoff = now - 2 * 60 * 60 * 1000;
-    this.rlSamples = this.rlSamples.filter((s) => s.ts >= cutoff).slice(-60);
-  }
-
-  /** 창 리셋 전 한도 도달 시에만 reaches=true (5시간 창에 '2일 후 소진' 같은 모순 방지). */
-  private computeProjection(now: number, rl?: RateLimitSnapshot | null): UsageState["projection"] {
-    const s = this.rlSamples;
-    if (!rl || s.length < 2) {
-      return null;
-    }
-    const newest = s[s.length - 1];
-    const oldest = s[0];
-    const dtHours = (newest.ts - oldest.ts) / 3_600_000;
-    if (dtHours < 0.05) {
-      return null;
-    }
-    const proj = (cur?: number, old?: number, resetsAtSec?: number | null) => {
-      if (typeof cur !== "number" || typeof old !== "number") {
-        return null;
-      }
-      const ratePerHour = (cur - old) / dtHours;
-      if (ratePerHour <= 0.05) {
-        return { reaches: false };
-      }
-      const hoursToFull = (100 - cur) / ratePerHour;
-      if (!isFinite(hoursToFull) || hoursToFull < 0) {
-        return { reaches: false };
-      }
-      const etaMs = now + hoursToFull * 3_600_000;
-      const resetMs = typeof resetsAtSec === "number" ? resetsAtSec * 1000 : NaN;
-      if (isFinite(resetMs) && etaMs >= resetMs) {
-        return { reaches: false }; // 리셋이 먼저 → 이번 창 미도달
-      }
-      return { reaches: true, hoursToFull, etaMs };
-    };
-    return {
-      primary: proj(newest.primary, oldest.primary, rl.primary?.resetsAt),
-      secondary: proj(newest.secondary, oldest.secondary, rl.secondary?.resetsAt),
-    };
+    this.reshapeTimer = setTimeout(() => {
+      this.reshapeTimer = undefined;
+      void this.refreshServer();
+    }, 2000);
   }
 
   private setState(patch: Partial<UsageState>): void {
@@ -316,13 +334,3 @@ export class UsageService implements vscode.Disposable {
   }
 }
 
-function mergeRateLimit(previous: RateLimitSnapshot | null | undefined, next: RateLimitSnapshot): RateLimitSnapshot {
-  return {
-    ...previous,
-    ...next,
-    primary: next.primary ? { ...previous?.primary, ...next.primary } : previous?.primary,
-    secondary: next.secondary ? { ...previous?.secondary, ...next.secondary } : previous?.secondary,
-    credits: next.credits ? { ...previous?.credits, ...next.credits } : previous?.credits,
-    individualLimit: next.individualLimit ? { ...previous?.individualLimit, ...next.individualLimit } : previous?.individualLimit,
-  };
-}

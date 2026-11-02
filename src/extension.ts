@@ -5,6 +5,7 @@ import {
   formatClaudeTooltip,
   formatStatusBarText,
   formatTooltip,
+  statusBarLevel,
 } from "./dashboard";
 import { UsageService } from "./usageService";
 import { ClaudeService } from "./claudeService";
@@ -52,15 +53,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   output.appendLine("AI 에이전트 사용량 모니터 activated (Codex + Claude).");
 
-  // 사용률에 따라 상태바 배경을 경고색으로 강조한다(>=95% 빨강, >=80% 노랑).
-  const warnColor = (percent: number | undefined): vscode.ThemeColor | undefined => {
-    if (typeof percent !== "number") {
-      return undefined;
-    }
-    if (percent >= 95) {
+  // 상태바에 올린 한도 창의 단계로 배경을 강조한다(서버 심각도 우선, 없으면 >=95% 빨강 · >=80% 노랑).
+  const warnColor = (level: 0 | 1 | 2): vscode.ThemeColor | undefined => {
+    if (level >= 2) {
       return new vscode.ThemeColor("statusBarItem.errorBackground");
     }
-    if (percent >= 80) {
+    if (level >= 1) {
       return new vscode.ThemeColor("statusBarItem.warningBackground");
     }
     return undefined;
@@ -72,8 +70,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const s = service.currentState;
     statusBar.text = formatStatusBarText(s);
     statusBar.tooltip = formatTooltip(s);
-    const peak = Math.max(s.rateLimits?.primary?.usedPercent ?? 0, s.rateLimits?.secondary?.usedPercent ?? 0);
-    statusBar.backgroundColor = warnColor(peak);
+    statusBar.backgroundColor = warnColor(statusBarLevel(s.limits));
     if (showCodex && hasUsableCodex(s)) {
       statusBar.show();
     } else {
@@ -87,8 +84,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const s = claude.currentState;
     claudeStatusBar.text = formatClaudeStatusBar(s);
     claudeStatusBar.tooltip = formatClaudeTooltip(s);
-    const peak = Math.max(s.plan?.fiveHour?.utilization ?? 0, s.plan?.sevenDay?.utilization ?? 0);
-    claudeStatusBar.backgroundColor = warnColor(peak);
+    claudeStatusBar.backgroundColor = warnColor(statusBarLevel(s.plan?.windows));
     if (showClaude && hasUsableClaude(s)) {
       claudeStatusBar.show();
     } else {
