@@ -2,6 +2,8 @@
 src/**
 scripts/**
 docs/**
+# 아이콘만 설치 파일에 싣는다(package.json "icon" — 확장 목록·마켓 타일).
+!docs/icon.png
 node_modules/**
 tsconfig.json
 package-lock.json

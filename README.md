@@ -1,6 +1,6 @@
 # AI 에이전트 사용량 모니터 (Codex + Claude)
 
-VS Code에서 **Codex와 Claude Code 사용량을 동시에** 항시 볼 수 있게 해주는 로컬 확장입니다.
+VS Code에서 **Codex와 Claude Code 사용량을 동시에** 항시 볼 수 있게 해주는 로컬 확장입니다. *(마켓플레이스용 영문 소개: [docs/README.en.md](docs/README.en.md))*
 
 두 에이전트 모두 **별도 로그인 없이** 이미 로그인된 CLI의 자격증명을 그대로 재사용합니다.
 
@@ -97,6 +97,16 @@ npm test                          # 기본 1.96.0에서 실행
 $env:VSCODE_TEST_VERSION="1.105.0"; npm test   # 버전 지정
 npm run test:limits               # 한도 창 정규화·표시 회귀 시험(플레인 Node, 확장 호스트 불필요)
 ```
+
+설치 파일 만들기:
+
+```powershell
+npm run package          # codex-usage-monitor-<버전>.vsix (publisher local — Releases 배포·기존 설치본 덮어쓰기 업그레이드용)
+npm run package:market   # codex-usage-monitor-<버전>-marketplace.vsix (publisher kimbyungsu · 영문 README — 마켓 관리 페이지 업로드용)
+npm run icon             # docs/icon.png 재생성(외부 라이브러리 없음)
+```
+
+> 두 파일은 확장 ID가 다릅니다(`local.codex-usage-monitor` / `kimbyungsu.codex-usage-monitor`). 한 PC에 둘 다 설치하면 상태바 항목이 두 벌 생기니 하나만 설치하세요. 마켓은 같은 버전 재업로드를 거부하므로 게시할 때마다 버전을 올려야 합니다.
 
 > **Windows 경로 제약**: `@vscode/test-electron`는 확장 경로에 **공백/일부 비ASCII(한글 등)** 가 있으면 테스트 호스트로 넘기는 인자가 공백에서 잘려 실패합니다. 이 저장소 경로(예: `에이전트 활용`)가 그렇다면, **공백·한글이 없는 경로로 복사**한 뒤 거기서 `npm test` 를 실행하세요.
 > ```powershell
