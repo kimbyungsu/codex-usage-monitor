@@ -13,3 +13,6 @@ out/test/**
 .systemca.pem
 *.vsix
 .gitignore
+# 이 PC 전용 도구 설정(Claude Code 등)과 검증 도구 기록은 설치 파일에 싣지 않는다.
+.claude/**
+verify-envelope*.json

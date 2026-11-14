@@ -5,10 +5,12 @@ import { UsageService } from "./usageService";
 import { UsageState } from "./types";
 import { ClaudeService } from "./claudeService";
 import { ClaudeState } from "./claudeTypes";
-import { limitLabel, resolveLang, t, webviewStrings } from "./i18n";
+import { forecastText, formatWhen, limitLabel, resolveLang, t, webviewStrings } from "./i18n";
 import {
+  Forecast,
+  forecastWindow,
+  HoldReason,
   hasAccountFiveHour,
-  LimitProjection,
   LimitWindow,
   shortSpanLabel,
   statusBarWindows,
@@ -94,19 +96,29 @@ export class Dashboard implements vscode.Disposable {
     }
   }
 
+  /** 시간만 흘러도(새 응답 없이) 남은 시간·리셋 경과·노후 표시가 바뀌도록 주기적으로 다시 그린다. */
+  rerender(): void {
+    this.postState();
+  }
+
   private postState(): void {
     if (!this.panel) {
       return;
     }
+    const now = Date.now();
     const codex = this.service.currentState;
     const claude = this.claude.currentState;
+    const codexFresh: Freshness = { failing: codex.serverFailing, checking: codex.accountChecking, holdReasons: codex.holdReasons };
+    const claudeFresh: Freshness = { failing: claude.planFailing, checking: claude.planAccountChecking, holdReasons: claude.holdReasons };
     this.panel.webview.postMessage({
       type: "state",
-      state: { ...codex, limits: withLabels(codex.limits) },
+      state: { ...codex, limits: withViews(codex.limits, codex.holds, codexFresh, now) },
       claude: {
         ...claude,
         planText: claudePlanText(claude),
-        plan: claude.plan ? { ...claude.plan, windows: withLabels(claude.plan.windows) } : claude.plan,
+        plan: claude.plan
+          ? { ...claude.plan, windows: withViews(claude.plan.windows, claude.holds, claudeFresh, now) }
+          : claude.plan,
       },
       extraPaths: this.getExtraPaths(),
       codexExtraPaths: this.getCodexExtraPaths(),
@@ -346,37 +358,65 @@ function statusBarLimitText(windows: LimitWindow[]): string {
   return parts.join(" · ");
 }
 
-/** 툴팁 줄들: 창마다 게이지 + 남은% + 리셋, 계정 전체 5시간 창이 없으면 그 사실(현재 요금제명 포함)을 한 줄로. */
+/** 마지막 조회 실패 여부(실패 중이면 시간과 무관하게 이전 관측 표시 중). 노후 시각은 창마다(w.staleAtMs). */
+interface Freshness {
+  failing?: boolean;
+  /** 창별 보류 사유(문구 구분용). */
+  holdReasons?: Record<string, HoldReason>;
+  /** 계정 변경 확인 중(표시값이 이전 계정 것일 수 있음). */
+  checking?: boolean;
+}
+
+/** 표시 시점(now) 기준 소진 예상 + 문구. 같은 계산을 툴팁·카드·그래프가 함께 쓴다. */
+function evaluate(
+  w: LimitWindow,
+  holds: Record<string, boolean> | undefined,
+  fresh: Freshness,
+  now: number,
+): { forecast: Forecast; text: string } {
+  const forecast = forecastWindow(w, now, { held: Boolean(holds?.[w.id]), heldReason: fresh.holdReasons?.[w.id] });
+  const stale = Boolean(fresh.failing) || (typeof w.staleAtMs === "number" && now >= w.staleAtMs);
+  const text = forecastText(forecast, stale);
+  return { forecast, text: fresh.checking ? `${t().fcAccountChecking} · ${text}` : text };
+}
+
+/** 툴팁 줄들: 창마다 게이지 + 남은% + 리셋 시각 + 소진 예상 한 줄. 계정 전체 5시간 창이 없으면 그 사실도 한 줄로. */
 function tooltipLimitLines(
   windows: LimitWindow[],
-  projection: Record<string, LimitProjection | null> | null | undefined,
+  holds: Record<string, boolean> | undefined,
+  fresh: Freshness,
   planName?: string | null,
 ): string[] {
   const T = t();
-  const lines = windows.map((w) => {
+  const now = Date.now();
+  const lines: string[] = [];
+  for (const w of windows) {
     const pct = remainPct(w.usedPercent);
     const tail = w.resetsAtMs
-      ? T.remainResetsIn(pct, countdownLong(w.resetsAtMs), new Date(w.resetsAtMs).toLocaleString())
+      ? T.remainResetsIn(pct, countdownLong(w.resetsAtMs), formatWhen(w.resetsAtMs))
       : T.remainNoReset(pct);
-    return `${limitLabel(w, T)}: ${gaugeBar(w.usedPercent)} ${tail}`;
-  });
+    lines.push(`${limitLabel(w, T)}: ${gaugeBar(w.usedPercent)} ${tail}`);
+    lines.push(`   ↳ ${evaluate(w, holds, fresh, now).text}`);
+  }
   if (windows.length && !hasAccountFiveHour(windows)) {
     lines.push(T.noFiveHour(planName ?? null));
-  }
-  for (const w of windows) {
-    const p = projection?.[w.id];
-    if (p?.reaches) {
-      lines.push(`${T.limitEta(limitLabel(w, T))}: ${formatHours(p.hoursToFull ?? 0)} ${T.after}`);
-    }
   }
   return lines;
 }
 
-/** 대시보드로 보낼 때 창마다 표시 라벨을 붙인다(라벨 규칙은 i18n.limitLabel 한 곳). */
-function withLabels(windows: LimitWindow[] | undefined): LimitWindow[] | undefined {
-  if (!windows) return windows;
+/** 대시보드로 보낼 때 창마다 라벨·소진 예상(상태·문구·그래프용 좌표)을 붙인다 — 화면 쪽은 다시 계산하지 않는다. */
+export function withViews(
+  windows: LimitWindow[] | undefined,
+  holds: Record<string, boolean> | undefined,
+  fresh: Freshness,
+  now: number,
+): Array<LimitWindow & { forecast: Forecast; forecastText: string }> | undefined {
+  if (!windows) return undefined;
   const T = t();
-  return windows.map((w) => ({ ...w, label: limitLabel(w, T) }));
+  return windows.map((w) => {
+    const { forecast, text } = evaluate(w, holds, fresh, now);
+    return { ...w, label: limitLabel(w, T), forecast, forecastText: text };
+  });
 }
 
 /** 상태바 강조색 기준(0/1/2): 상태바에 올린 창 중 최고 단계. 서버 심각도 우선, 없으면 80/95%. */
@@ -407,7 +447,18 @@ export function formatTooltip(state: UsageState): string {
     const plan = state.planLabel ?? state.account.planType ?? "unknown";
     parts.push(`${T.codexAccount}: ${state.account.email ?? state.account.type} (${plan})`);
   }
-  parts.push(...tooltipLimitLines(state.limits ?? [], state.projection, state.planLabel ?? state.account?.planType));
+  // 한도 창이 없어도(계정·크레딧만 표시 중) 계정 변경 확인 중임을 계정 정보 옆에 알린다(창이 있으면 창마다 붙음).
+  if (state.accountChecking && !state.limits?.length) {
+    parts.push(`   ↳ ${T.fcAccountChecking}`);
+  }
+  parts.push(
+    ...tooltipLimitLines(
+      state.limits ?? [],
+      state.holds,
+      { failing: state.serverFailing, checking: state.accountChecking, holdReasons: state.holdReasons },
+      state.planLabel ?? state.account?.planType,
+    ),
+  );
   if (state.tokenUsage) {
     parts.push(`${T.threadTokens}: ${state.tokenUsage.tokenUsage.total.totalTokens.toLocaleString()}`);
   }
@@ -457,7 +508,18 @@ export function formatClaudeTooltip(state: ClaudeState): string {
   const parts: string[] = [];
   const planText = claudePlanText(state);
   parts.push(planText ? `Claude ${planText}` : T.claudeCredsMissing);
-  parts.push(...tooltipLimitLines(state.plan?.windows ?? [], state.projection, state.planDisplayName ?? state.subscriptionType));
+  // 한도 창이 없어도(요금제 정보만 표시 중) 계정 변경 확인 중임을 요금제 옆에 알린다(창이 있으면 창마다 붙음).
+  if (state.planAccountChecking && !state.plan?.windows?.length) {
+    parts.push(`   ↳ ${T.fcAccountChecking}`);
+  }
+  parts.push(
+    ...tooltipLimitLines(
+      state.plan?.windows ?? [],
+      state.holds,
+      { failing: state.planFailing, checking: state.planAccountChecking, holdReasons: state.holdReasons },
+      state.planDisplayName ?? state.subscriptionType,
+    ),
+  );
   const tok = state.tokens;
   if (tok) {
     parts.push(`${T.recent5hTokens}: ${tok.lastFiveHours.totalTokens.toLocaleString()} ($${tok.lastFiveHours.costUsd.toFixed(2)})`);
@@ -466,6 +528,9 @@ export function formatClaudeTooltip(state: ClaudeState): string {
   }
   if (state.planRateLimited) {
     parts.push(`⏳ ${state.planRateLimited}`);
+  }
+  if (state.planWaiting) {
+    parts.push(`🕓 ${state.planWaiting}`);
   }
   if (state.planError) {
     parts.push(`${T.plan}: ${state.planError}`);
@@ -537,20 +602,6 @@ function countdownLong(atMs: number | null | undefined): string {
   if (d > 0) return T.dh(d, h);
   if (h > 0) return T.hm(h, mm);
   return T.m(mm);
-}
-
-function formatHours(hours: number): string {
-  const T = t();
-  if (!isFinite(hours) || hours < 0) {
-    return T.unknown;
-  }
-  if (hours >= 24) {
-    return T.dh(Math.floor(hours / 24), Math.round(hours % 24));
-  }
-  if (hours >= 1) {
-    return T.hm(Math.floor(hours), Math.round((hours % 1) * 60));
-  }
-  return T.m(Math.max(1, Math.round(hours * 60)));
 }
 
 function getNonce(): string {

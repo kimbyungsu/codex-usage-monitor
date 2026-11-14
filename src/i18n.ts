@@ -1,7 +1,7 @@
 // 다국어(EN/KO). 표시 언어는 설정(codexUsageMonitor.language) 또는
 // VS Code 표시 언어(vscode.env.language)를 따른다.
 import * as vscode from "vscode";
-import { LimitSpan, LimitWindow } from "./limits";
+import { Forecast, LimitSpan, LimitWindow } from "./limits";
 
 export type Lang = "en" | "ko";
 
@@ -34,7 +34,21 @@ interface TsStrings {
   nHours: (n: number) => string;
   nMinutes: (n: number) => string;
   genericLimit: string;
-  limitEta: (label: string) => string;
+  // 소진 예상(창 시작 이후 평균)
+  fcBefore: (eta: string, reset: string) => string;
+  fcBoundary: (range: string, reset: string) => string;
+  fcSafe: (pct: number) => string;
+  fcEtaPassed: (eta: string) => string;
+  fcExpired: string;
+  fcReached: string;
+  fcUnknown: string;
+  fcTooEarly: string;
+  fcHeld: string;
+  fcTrackingLost: string;
+  fcMetaPending: string;
+  fcIdle: string;
+  fcStale: (at: string) => string;
+  fcAccountChecking: string;
   noFiveHour: (plan: string | null) => string;
   noneShort: string;
   usedResetsIn: (pct: number, cd: string, at: string) => string;
@@ -53,6 +67,8 @@ interface TsStrings {
   token: string;
   // 429 안내 (알림 아님, 차분한 상태 문구)
   rateLimited: (secs: number) => string;
+  // 로그인 토큰 만료로 기다리는 중(알림 아님 — 확장은 토큰을 갱신하지 않음)
+  planWaitingForClaude: (lastChecked: string | null) => string;
   // 알림 / 시작
   alert: (label: string, pct: number, top: number, reset: string) => string;
   startupNotice: string;
@@ -89,7 +105,20 @@ const KO: TsStrings = {
   nHours: (n) => `${n}시간`,
   nMinutes: (n) => `${n}분`,
   genericLimit: "사용 한도",
-  limitEta: (label) => `${label} 소진 예상`,
+  fcBefore: (eta, reset) => `창 시작 이후 평균이 유지되면 ${eta} 무렵 소진 (리셋 ${reset} 전)`,
+  fcBoundary: (range, reset) => `리셋(${reset}) 무렵 경계 — 창 시작 이후 평균이 유지되면 리셋 시 약 ${range}%`,
+  fcSafe: (pct) => `창 시작 이후 평균이 유지되면 리셋 시 약 ${pct}% (소진 안 함)`,
+  fcEtaPassed: (eta) => `예상 소진 시각(${eta})이 지났지만 100% 관측은 아직 없음 — 새 관측 필요`,
+  fcExpired: "리셋 시각이 지남 — 새 값 대기(리셋 기준이 바뀌었을 수 있음)",
+  fcReached: "사용률 100% 보고 — 리셋까지 대기",
+  fcUnknown: "리셋 시각·창 길이 정보가 없어 예상 불가",
+  fcTooEarly: "창이 막 시작돼 예상 보류",
+  fcHeld: "같은 창에서 사용률이 내려감(한도 복원·보정) — 이 창이 끝날 때까지 예상 보류",
+  fcTrackingLost: "리셋 기준이 너무 자주 바뀌어 같은 창 추적 기록이 부족함 — 잃은 기록의 창들이 리셋될 때까지 예상 보류",
+  fcMetaPending: "서버의 창 정보가 서로 맞지 않아 확인 대기",
+  fcIdle: "보고 사용률 0% — 속도 추정 대기",
+  fcStale: (at) => `마지막 관측 ${at} 기준`,
+  fcAccountChecking: "계정 변경 확인 중 — 이전 계정 값일 수 있음",
   noFiveHour: (plan) =>
     `5시간 한도: 없음 — 현재 ${plan ? `${plan} 요금제에` : "이 계정에"} 적용되지 않음 (다시 적용되면 자동 표시)`,
   noneShort: "없음",
@@ -108,6 +137,10 @@ const KO: TsStrings = {
   token: "토큰",
   rateLimited: (secs) =>
     `사용량 서버가 잠시 제한 중입니다 · 마지막 값 표시 · 다음 시도 약 ${secs}초 후`,
+  planWaitingForClaude: (lastChecked) =>
+    lastChecked
+      ? `마지막 확인 ${lastChecked} · Claude Code를 쓰면 자동으로 다시 확인합니다`
+      : "Claude Code를 쓰면 자동으로 확인합니다",
   alert: (label, pct, top, reset) =>
     `Claude ${label} ${pct}% 도달 (임계치 ${top}%)${reset ? ` · 리셋 ${reset}` : ""}`,
   startupNotice: "AI 에이전트 사용량 모니터가 시작되었습니다. 왼쪽 상태바의 Codex/Claude 항목을 누르면 대시보드가 열립니다.",
@@ -143,7 +176,20 @@ const EN: TsStrings = {
   nHours: (n) => `${n}-hour`,
   nMinutes: (n) => `${n}-minute`,
   genericLimit: "Usage limit",
-  limitEta: (label) => `${label} ETA`,
+  fcBefore: (eta, reset) => `If the average since the window started holds, runs out around ${eta} (before reset ${reset})`,
+  fcBoundary: (range, reset) => `Borderline around reset (${reset}) — at the average since the window started, about ${range}% at reset`,
+  fcSafe: (pct) => `If the average since the window started holds, about ${pct}% at reset (won't run out)`,
+  fcEtaPassed: (eta) => `Projected run-out time (${eta}) has passed but 100% hasn't been observed — needs a new reading`,
+  fcExpired: "Reset time has passed — waiting for new values (the reset point may have moved)",
+  fcReached: "100% usage reported — waiting for reset",
+  fcUnknown: "No reset time / window length — can't project",
+  fcTooEarly: "Window just started — projection on hold",
+  fcHeld: "Usage went down within the same window (limit restore/correction) — projection on hold until this window ends",
+  fcTrackingLost: "Reset points changed too often to keep enough window history — projection on hold until those windows reset",
+  fcMetaPending: "Server window info is inconsistent — waiting to confirm",
+  fcIdle: "0% usage reported — waiting to estimate pace",
+  fcStale: (at) => `as of last reading ${at}`,
+  fcAccountChecking: "Checking account change — values may be from the previous account",
   noFiveHour: (plan) =>
     `5-hour limit: none — not applied to ${plan ? `the ${plan} plan` : "this account"} right now (shows automatically if re-applied)`,
   noneShort: "none",
@@ -162,6 +208,10 @@ const EN: TsStrings = {
   token: "Tokens",
   rateLimited: (secs) =>
     `Usage server is briefly throttling · showing last value · next try in ~${secs}s`,
+  planWaitingForClaude: (lastChecked) =>
+    lastChecked
+      ? `Last checked ${lastChecked} · checks again automatically when you use Claude Code`
+      : "Checks automatically when you use Claude Code",
   alert: (label, pct, top, reset) =>
     `Claude ${label} reached ${pct}% (threshold ${top}%)${reset ? ` · resets ${reset}` : ""}`,
   startupNotice: "AI Agent Usage Monitor started. Click the Codex/Claude item in the left status bar to open the dashboard.",
@@ -182,6 +232,66 @@ const EN: TsStrings = {
 
 export function t(lang: Lang = resolveLang()): TsStrings {
   return lang === "ko" ? KO : EN;
+}
+
+/** 요일·날짜·시각(며칠 뒤 시각도 헷갈리지 않게). */
+export function formatWhen(ms: number, lang: Lang = resolveLang()): string {
+  return new Date(ms).toLocaleString(lang === "ko" ? "ko-KR" : "en-US", {
+    weekday: "short",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/** 소진 예상 한 줄(툴팁·대시보드 공용). stale 이면 '마지막 관측 기준'을 덧붙인다. */
+export function forecastText(f: Forecast, stale = false, lang: Lang = resolveLang()): string {
+  const T = t(lang);
+  const when = (ms?: number) => (typeof ms === "number" && isFinite(ms) ? formatWhen(ms, lang) : T.unknown);
+  let text: string;
+  switch (f.state) {
+    case "before":
+      text = f.etaPassed ? T.fcEtaPassed(when(f.etaMs)) : T.fcBefore(when(f.etaMs), when(f.resetsAtMs));
+      break;
+    case "boundary": {
+      if (f.etaPassed) {
+        text = T.fcEtaPassed(when(f.etaMs));
+        break;
+      }
+      const lo = Math.round(f.atResetLo ?? 0);
+      const hi = Math.round(f.atResetHi ?? 0);
+      text = T.fcBoundary(lo === hi ? String(lo) : `${lo}~${hi}`, when(f.resetsAtMs));
+      break;
+    }
+    case "safe":
+      text = T.fcSafe(Math.round(f.atReset ?? 0));
+      break;
+    case "expired":
+      text = T.fcExpired;
+      break;
+    case "reached":
+      text = T.fcReached;
+      break;
+    case "tooEarly":
+      text = T.fcTooEarly;
+      break;
+    case "held":
+      text = f.heldReason === "tracking" ? T.fcTrackingLost : T.fcHeld;
+      break;
+    case "metaPending":
+      text = T.fcMetaPending;
+      break;
+    case "idle":
+      text = T.fcIdle;
+      break;
+    default:
+      text = T.fcUnknown;
+  }
+  if (stale && f.observedAtMs) {
+    text += ` · ${T.fcStale(when(f.observedAtMs))}`;
+  }
+  return text;
 }
 
 /**
@@ -223,6 +333,7 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     noPaths: "추가된 경로 없음 — 이 PC만 집계 중",
     notConnected: "연결 안 됨",
     planLimitsCard: "사용 한도",
+    accountChecking: "계정 변경 확인 중 — 이전 계정 정보일 수 있음",
     limitFallback: "사용 한도",
     noFiveHourNote: "5시간 한도 없음 — 서버가 현재 이 계정에 주간 등 다른 창만 보고합니다. 요금제·시기에 따라 폐지/부활될 수 있으며, 다시 보고되면 자동으로 표시됩니다.",
     sessionCard: "현재 세션 (이 PC)",
@@ -240,10 +351,6 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     resetsUntil: "리셋까지",
     noResetTime: "리셋 시각 미상",
     thisPcTokens: "이 PC 토큰",
-    byTrend: "현재 추세로",
-    about: "약",
-    afterExhaust: "후 소진 예상",
-    noReachWindow: "현재 추세론 이번 창 내 한도 미도달",
     noSession: "세션 없음",
     tokensUnit: "토큰",
     model: "모델",
@@ -366,7 +473,7 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     heatMore: "많음",
     weekdaysShort: "월,화,수,목,금,토,일",
     // 한도 스파크라인
-    sparkNote: "최근 사용률 추이 · 점선은 현재 추세 연장",
+    sparkNote: "창 시작 → 리셋 · 실선 = 관측한 사용률 · 점선 = 창 시작 이후 평균이 유지될 때",
   };
 
   const en: Record<string, string> = {
@@ -385,6 +492,7 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     noPaths: "No paths added — counting this PC only",
     notConnected: "Not connected",
     planLimitsCard: "Usage limits",
+    accountChecking: "Checking account change — this may be the previous account's info",
     limitFallback: "Usage limit",
     noFiveHourNote: "No 5-hour limit — the server currently reports only other windows (e.g. weekly) for this account. It may be removed or restored per plan/period, and shows up automatically when reported again.",
     sessionCard: "Current session (this PC)",
@@ -402,10 +510,6 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     resetsUntil: "resets in",
     noResetTime: "no reset time",
     thisPcTokens: "This PC tokens",
-    byTrend: "At current rate,",
-    about: "about",
-    afterExhaust: "until exhausted",
-    noReachWindow: "At current rate, won't hit this window's limit",
     noSession: "No session",
     tokensUnit: "tokens",
     model: "Model",
@@ -527,7 +631,7 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     heatMore: "More",
     weekdaysShort: "Mon,Tue,Wed,Thu,Fri,Sat,Sun",
     // Limit sparkline
-    sparkNote: "Recent utilization trend · dashed line extends the current rate",
+    sparkNote: "Window start → reset · solid = observed usage · dashed = if the average since the window started holds",
   };
 
   return lang === "ko" ? ko : en;

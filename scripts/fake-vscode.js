@@ -18,4 +18,6 @@ module.exports = {
     showInformationMessage: () => Promise.resolve(undefined),
   },
   env: { language: "ko" },
+  extensions: { getExtension: () => undefined },
+  ThemeColor: class {},
 };

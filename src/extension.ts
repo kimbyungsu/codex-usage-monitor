@@ -7,6 +7,8 @@ import {
   formatTooltip,
   statusBarLevel,
 } from "./dashboard";
+import * as path from "path";
+import { LimitHistoryStore } from "./limitHistory";
 import { UsageService } from "./usageService";
 import { ClaudeService } from "./claudeService";
 import { t } from "./i18n";
@@ -39,8 +41,16 @@ function hasUsableClaude(state: ClaudeState): boolean {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel("AI 에이전트 사용량 모니터");
-  const service = new UsageService(output);
-  const claude = new ClaudeService(output);
+  // 그래프용 사용률 기록: 확장 전용 저장 폴더에, 이 VS Code 창 구분자로 된 자기 파일에만 쓴다(여러 창이 서로 덮지 않음).
+  const history = new LimitHistoryStore(
+    path.join(context.globalStorageUri.fsPath, "limit-history"),
+    vscode.env.sessionId,
+    Date.now,
+    (m) => output.appendLine(m),
+  );
+  context.subscriptions.push({ dispose: () => history.dispose() });
+  const service = new UsageService(output, history);
+  const claude = new ClaudeService(output, history);
   const dashboard = new Dashboard(context.extensionUri, service, claude);
 
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 1000);
@@ -148,6 +158,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   renderStatusBar();
   renderClaudeStatusBar();
+  // 새 응답이 없어도 시간이 흐르면 남은 시간·리셋 경과·관측 노후·예상 시각 경과가 바뀐다 → 1분마다 다시 그림(API 호출 없음).
+  const tick = setInterval(() => {
+    renderStatusBar();
+    renderClaudeStatusBar();
+    dashboard.rerender();
+  }, 60_000);
+  context.subscriptions.push({ dispose: () => clearInterval(tick) });
   await Promise.all([service.start(), claude.start()]);
 
   const config = vscode.workspace.getConfiguration("codexUsageMonitor");

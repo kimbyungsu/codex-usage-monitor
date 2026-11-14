@@ -66,8 +66,31 @@ if (codex.error) {
 
 // ---- 3) 실제 Claude 트랜스크립트 1개로 턴 경계 규칙 확인 ----
 const projects = path.join(os.homedir(), ".claude", "projects");
+// 턴 경계 = 실제 사람 입력(도구 결과·메타·서브에이전트 프롬프트 제외) — 확장(claudeService)과 같은 규칙.
+// 파일 선택과 턴 집계가 이 한 함수를 함께 쓴다.
+function isRealUserInput(o) {
+  if (!o || o.type !== "user" || o.isSidechain || o.isMeta || o.toolUseResult != null) return false;
+  const c = o.message && o.message.content;
+  return typeof c === "string" ? c.trim().length > 0 : Array.isArray(c) && c.some((p) => p && p.type === "text");
+}
+// 가장 최근 '사람이 입력한 대화가 있는' 트랜스크립트. 하위 작업자(서브에이전트) 기록처럼 사람 입력이 없는 파일이
+// 가장 최근이어도 시험이 깨지지 않게 건너뛴다.
+function hasMainThreadInput(file) {
+  try {
+    return fs.readFileSync(file, "utf8").split("\n").some((line) => {
+      if (!line.includes('"type":"user"')) return false;
+      try {
+        return isRealUserInput(JSON.parse(line));
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false;
+  }
+}
 function newestJsonl(dir) {
-  let best = null;
+  const found = [];
   const walk = (d, depth) => {
     if (depth > 4) return;
     let items;
@@ -77,12 +100,14 @@ function newestJsonl(dir) {
       if (it.isDirectory()) walk(full, depth + 1);
       else if (it.name.endsWith(".jsonl")) {
         const st = fs.statSync(full);
-        if (st.size < 200 * 1024 * 1024 && (!best || st.mtimeMs > best.mtimeMs)) best = { full, mtimeMs: st.mtimeMs };
+        if (st.size < 200 * 1024 * 1024) found.push({ full, mtimeMs: st.mtimeMs });
       }
     }
   };
   walk(dir, 0);
-  return best && best.full;
+  found.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const pick = found.slice(0, 50).find((f) => hasMainThreadInput(f.full));
+  return pick && pick.full;
 }
 const file = newestJsonl(projects);
 if (!file) {
@@ -96,11 +121,7 @@ if (!file) {
     if (!t || t[0] !== "{") continue;
     let o;
     try { o = JSON.parse(t); } catch { continue; }
-    if (o.type === "user" && !o.isSidechain && !o.isMeta && o.toolUseResult == null) {
-      const c = o.message && o.message.content;
-      const real = typeof c === "string" ? c.trim().length > 0 : Array.isArray(c) && c.some((p) => p && p.type === "text");
-      if (real) turnSeq += 1;
-    }
+    if (isRealUserInput(o)) turnSeq += 1;
     const u = o.message && o.message.usage;
     if (!u) continue;
     const total = (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);

@@ -21,7 +21,8 @@ const { ClaudeService } = require("../out/claudeService.js");
 const { normalizeUsage } = require("../out/claudeApi.js");
 const { readCodexHistory } = require("../out/codexHistory.js");
 const { windowsFromCodex } = require("../out/limits.js");
-const { limitLabel, t, webviewStrings } = require("../out/i18n.js");
+const { webviewStrings } = require("../out/i18n.js");
+const { withViews } = require("../out/dashboard.js");
 
 const root = path.join(__dirname, "..");
 // SHOT_DIR: 검증용으로 docs 대신 다른 폴더에 하니스를 쓰고 싶을 때.
@@ -42,7 +43,7 @@ function anonymizeThreads(list) {
   });
 }
 
-// ---- 한도 샘플(스파크라인용 가상 추세: 창 하나의 [{ts, v}]) ----
+// ---- 한도 샘플(그래프용 가상 관측: 창 시작 → 지금, [{ts, v}]) ----
 function ramp(from, to, amp = 0.8, minutes = 100, n = 14) {
   const out = [];
   for (let i = 0; i < n; i++) {
@@ -52,8 +53,9 @@ function ramp(from, to, amp = 0.8, minutes = 100, n = 14) {
   return out;
 }
 
-// 대시보드가 받는 것과 같게 창마다 표시 라벨을 붙인다(Dashboard.postState 와 동일).
-const withLabels = (windows) => windows.map((w) => ({ ...w, label: limitLabel(w, t("ko")) }));
+// 대시보드가 받는 것과 같게 창마다 라벨·소진 예상을 붙인다(Dashboard.postState 와 같은 함수).
+const fresh = { failing: false };
+const views = (windows) => withViews(windows, {}, fresh, now);
 
 // ---- Claude 상태 (토큰·차트 = 실데이터, 한도 = 가상) ----
 const svc = new ClaudeService({ appendLine() {} });
@@ -73,15 +75,12 @@ const claudeState = {
         { kind: "session", group: "session", percent: 56, severity: "normal", resets_at: new Date(now + 165 * 60_000).toISOString(), scope: null, is_active: true },
         { kind: "weekly_all", group: "weekly", percent: 64, severity: "normal", resets_at: new Date(now + 3.4 * DAY).toISOString(), scope: null, is_active: false },
       ],
-    });
-    return { ...plan, windows: withLabels(plan.windows) };
+    }, now);
+    return { ...plan, windows: views(plan.windows) };
   })(),
   tokens,
-  projection: {
-    session: { reaches: true, hoursToFull: 2.3, etaMs: now + 2.3 * HOUR },
-    weekly_all: { reaches: false },
-  },
-  samples: { session: ramp(34, 56), weekly_all: ramp(58, 64, 0.3) },
+  // 창 시작부터 지금까지(5시간 창은 135분 전 시작, 주간 창은 3.6일 전 시작).
+  samples: { session: ramp(0, 56, 0.8, 135), weekly_all: ramp(0, 64, 0.6, 3.6 * 24 * 60, 24) },
   lastPlanRefresh: now,
   lastTokenRefresh: now,
 };
@@ -98,11 +97,7 @@ const codexState = {
     primary: { usedPercent: 37, resetsAt: Math.floor((now + 2.1 * HOUR) / 1000), windowDurationMins: 300 },
     secondary: { usedPercent: 61, resetsAt: Math.floor((now + 4.2 * DAY) / 1000), windowDurationMins: 10080 },
   },
-  projection: {
-    "codex:5h": { reaches: true, hoursToFull: 1.8, etaMs: now + 1.8 * HOUR },
-    "codex:weekly": { reaches: false },
-  },
-  samples: { "codex:5h": ramp(22, 37), "codex:weekly": ramp(55, 61, 0.3) },
+  samples: { "codex:5h": ramp(0, 37, 0.8, 174), "codex:weekly": ramp(0, 61, 0.6, 2.8 * 24 * 60, 24) },
   tokenUsage: {
     threadId: "session-01",
     turnId: "turn-08",
@@ -116,7 +111,7 @@ const codexState = {
   lastRefresh: now,
   lastHistoryScanOkAt: now,
 };
-codexState.limits = withLabels(windowsFromCodex(codexState.rateLimits, null));
+codexState.limits = views(windowsFromCodex(codexState.rateLimits, null, now));
 
 // ---- HTML 하니스 생성 ----
 const css = fs.readFileSync(path.join(root, "media", "dashboard.css"), "utf8");

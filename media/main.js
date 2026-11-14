@@ -129,6 +129,14 @@
     if (s.planRateLimited) {
       cards.push('<div class="sub" style="grid-column:1/-1;margin:0">⏳ ' + escapeHtml(s.planRateLimited) + "</div>");
     }
+    // 로그인 토큰 만료로 기다리는 중 — 오류가 아니라 마지막 확인 시각만 차분하게.
+    if (s.planWaiting) {
+      cards.push('<div class="sub" style="grid-column:1/-1;margin:0">🕓 ' + escapeHtml(s.planWaiting) + "</div>");
+    }
+    // 계정 변경 확인 중인데 한도 창이 없으면(요금제 정보만 표시 중) 같은 줄에 차분하게(창이 있으면 창마다 붙음).
+    if (s.planAccountChecking && !((s.plan && s.plan.windows) || []).length) {
+      cards.push('<div class="sub" style="grid-column:1/-1;margin:0">🔄 ' + escapeHtml(S.accountChecking) + "</div>");
+    }
     // 서버가 보고한 한도 창만 그린다(5시간 창이 없는 플랜·시기면 그 카드는 없고 안내 한 줄).
     const windows = (s.plan && s.plan.windows) || [];
     windows.forEach((w) => {
@@ -136,7 +144,7 @@
       const tokenLine = bucket
         ? '<div class="sub">' + S.thisPcTokens + " " + compact(bucket.totalTokens) + " · $" + money(bucket.costUsd) + "</div>"
         : "";
-      cards.push(limitWindowCard(w, tokenLine, (s.projection || {})[w.id], (s.samples || {})[w.id], false));
+      cards.push(limitWindowCard(w, tokenLine, (s.samples || {})[w.id], false));
     });
     if (!s.plan) {
       cards.push(card(S.planLimitsCard, '<div class="value muted">' + S.noLimitInfo + "</div>"));
@@ -179,37 +187,24 @@
     return used >= 90 ? "danger" : used >= 70 ? "warn" : "";
   }
 
-  function limitWindowCard(w, tokenLine, proj, series, showDuration) {
+  // 소진 예상(상태·문구·그래프 좌표)은 확장 쪽 공통 계산 결과(w.forecast / w.forecastText)를 그대로 쓴다 — 여기서 다시 계산하지 않는다.
+  function limitWindowCard(w, tokenLine, series, showDuration) {
     const used = Number(w.usedPercent || 0);
     const reset = w.resetsAtMs
-      ? S.resetsUntil + " " + countdown(w.resetsAtMs) + " (" + new Date(w.resetsAtMs).toLocaleString() + ")"
+      ? S.resetsUntil + " " + countdown(w.resetsAtMs) + " (" + formatWhen(w.resetsAtMs) + ")"
       : S.noResetTime;
     const duration = showDuration && w.windowMins ? " · " + formatDuration(w.windowMins) : "";
-    const projLine = proj
-      ? (proj.reaches
-          ? '<div class="sub">' + S.byTrend + " " + projText(proj) + "</div>"
-          : '<div class="sub">' + S.noReachWindow + "</div>")
-      : "";
+    const projLine = w.forecastText ? '<div class="sub">' + escapeHtml(w.forecastText) + "</div>" : "";
     return card(w.label || S.limitFallback,
       '<div class="row"><div class="value">' + used + S.usedSuffix + "</div></div>" +
       '<div class="bar"><div class="fill ' + barClass(w, used) + '" style="width:' + clamp(used, 0, 100) + '%"></div></div>' +
-      '<div class="sub">' + escapeHtml(reset + duration) + "</div>" + tokenLine + projLine + sparkSvg(series));
+      '<div class="sub">' + escapeHtml(reset + duration) + "</div>" + tokenLine + projLine + sparkSvg(series, w.forecast));
   }
 
   /** 서버가 창은 보고하는데 계정 전체 5시간 창이 없으면 그 사실을 한 줄로(카드 자리를 비워두지 않음). */
   function noFiveHourNote(windows) {
     if (!windows.length || windows.some((w) => w.span === "5h" && !w.scope)) return "";
     return '<div class="sub" style="grid-column:1/-1;margin:0">ⓘ ' + escapeHtml(S.noFiveHourNote) + "</div>";
-  }
-
-  function projText(proj) {
-    const h = Number(proj.hoursToFull || 0);
-    const eta = proj.etaMs ? " (" + new Date(proj.etaMs).toLocaleTimeString() + ")" : "";
-    let dur;
-    if (h >= 24) dur = Math.floor(h / 24) + S.dayN + " " + Math.round(h % 24) + S.hourN;
-    else if (h >= 1) dur = Math.floor(h) + S.hourN + " " + Math.round((h % 1) * 60) + S.minN;
-    else dur = Math.max(1, Math.round(h * 60)) + S.minN;
-    return S.about + " " + dur + " " + S.afterExhaust + eta;
   }
 
   function sessionHtml(tok, state) {
@@ -278,7 +273,7 @@
       const tokenLine = bucket
         ? '<div class="sub">' + S.sameWindowLocal + " " + compact(bucket.totalTokens) + " " + S.tokensUnit + "</div>"
         : "";
-      return limitWindowCard(w, tokenLine, (state.projection || {})[w.id], (state.samples || {})[w.id], true);
+      return limitWindowCard(w, tokenLine, (state.samples || {})[w.id], true);
     });
     if (!windows.length) {
       limitCards.push(card(S.planLimitsCard, '<div class="value muted">' + S.noLimitInfo + '</div><div class="sub">' + S.noLimitSub + "</div>"));
@@ -310,11 +305,15 @@
     return '<div class="value">' + status + '</div><div class="muted">' + escapeHtml(last) + "</div>" + error;
   }
   function accountHtml(account, state) {
-    if (!account) return '<div class="value">' + S.noAccount + '</div><div class="muted">requiresOpenaiAuth: ' + Boolean(state.requiresOpenaiAuth) + "</div>";
+    // 계정 변경 확인 중인데 한도 창이 없으면(계정·크레딧만 표시 중) 계정 카드에 차분하게(창이 있으면 창마다 붙음).
+    const checking =
+      state.accountChecking && !(state.limits || []).length ? '<div class="sub">🔄 ' + escapeHtml(S.accountChecking) + "</div>" : "";
+    if (!account)
+      return '<div class="value">' + S.noAccount + '</div><div class="muted">requiresOpenaiAuth: ' + Boolean(state.requiresOpenaiAuth) + "</div>" + checking;
     const email = account.email ? '<div class="muted">' + escapeHtml(account.email) + "</div>" : "";
     // 요금제: 공식 표기(예: 내부 식별자 → 표시명), 원문 식별자는 마우스 오버로.
     const plan = state.planLabel || account.planType || account.type || "Unknown";
-    return '<div class="value" title="' + escapeHtml(account.planType || "") + '">' + escapeHtml(plan) + "</div>" + email;
+    return '<div class="value" title="' + escapeHtml(account.planType || "") + '">' + escapeHtml(plan) + "</div>" + email + checking;
   }
   function creditsHtml(limit) {
     const credits = limit.credits;
@@ -618,39 +617,42 @@
     return '<div class="sub" style="margin-top:0">' + S.heatmapNote + '</div><div class="hm">' + cells + "</div>" + legend;
   }
 
-  /** 한도 사용률 스파크라인(창 하나의 시계열 [{ts, v}]). 점선 = 현재 추세 연장. */
-  function sparkSvg(series) {
-    const pts = (series || []).filter((p) => typeof p.v === "number");
-    if (pts.length < 2) return "";
-    return sparkCore(pts);
-  }
-  function sparkCore(pts) {
+  /**
+   * 한도 사용률 그래프: 가로축 = 창 시작 → 리셋(서버가 바꿔 보낸 최신 기준).
+   * 실선 = 이 창에서 관측한 사용률, 점선 = 창 시작 이후 평균이 유지될 때(공통 계산 결과).
+   * 보류·만료·계산 불가 상태에선 점선을 그리지 않고, 샘플이 적어도 점선은 그린다.
+   */
+  const MODEL_STATES = { before: 1, boundary: 1, safe: 1 };
+  function sparkSvg(series, fc) {
+    fc = fc || {};
+    const start = Number(fc.startMs), reset = Number(fc.resetsAtMs);
+    const hasWindow = isFinite(start) && isFinite(reset) && reset > start;
+    let pts = (series || []).filter((p) => typeof p.v === "number" && isFinite(p.ts));
+    if (hasWindow) pts = pts.filter((p) => p.ts >= start && p.ts <= reset);
+    const model = hasWindow && MODEL_STATES[fc.state] && !fc.etaPassed;
+    if (!model && pts.length < 2) return "";
     const W = 240, H = 44, P = 4;
-    const t0 = pts[0].ts;
-    const tNow = pts[pts.length - 1].ts;
-    const domain = Math.max((tNow - t0) * 1.35, 10 * 60 * 1000);
-    const x = (ts) => P + ((ts - t0) / domain) * (W - 2 * P);
+    const t0 = hasWindow ? start : pts[0].ts;
+    const t1 = hasWindow ? reset : Math.max(pts[pts.length - 1].ts, t0 + 10 * 60 * 1000);
+    const x = (ts) => P + ((clamp(ts, t0, t1) - t0) / (t1 - t0)) * (W - 2 * P);
     const y = (v) => H - P - (clamp(v, 0, 100) / 100) * (H - 2 * P);
-    const line = pts.map((p) => x(p.ts).toFixed(1) + "," + y(p.v).toFixed(1)).join(" ");
-    const first = pts[0], last = pts[pts.length - 1];
-    let proj = "";
-    const dt = last.ts - first.ts;
-    if (dt > 0) {
-      const rate = (last.v - first.v) / dt; // %/ms
-      if (rate > 0) {
-        const tFull = last.ts + (100 - last.v) / rate;
-        const tEnd = Math.min(tFull, t0 + domain);
-        if (tEnd > last.ts) {
-          proj = '<line class="proj" x1="' + x(last.ts).toFixed(1) + '" y1="' + y(last.v).toFixed(1) + '" x2="' + x(tEnd).toFixed(1) + '" y2="' + y(last.v + rate * (tEnd - last.ts)).toFixed(1) + '"/>';
-          if (tFull <= t0 + domain) {
-            proj += '<circle class="projdot" cx="' + x(tFull).toFixed(1) + '" cy="' + y(100).toFixed(1) + '" r="2.4"/>';
-          }
+    let body = '<line class="cap" x1="' + P + '" y1="' + y(100).toFixed(1) + '" x2="' + (W - P) + '" y2="' + y(100).toFixed(1) + '"/>';
+    if (pts.length >= 2) {
+      body += '<polyline class="hist" points="' + pts.map((p) => x(p.ts).toFixed(1) + "," + y(p.v).toFixed(1)).join(" ") + '"/>';
+    }
+    if (model) {
+      const O = Number(fc.observedAtMs), U = Number(fc.usedPercent);
+      if (isFinite(O) && O > start && isFinite(U)) {
+        const eta = Number(fc.etaMs);
+        const end = isFinite(eta) ? Math.min(eta, reset) : reset;
+        const vEnd = Math.min(100, (U * (end - start)) / (O - start));
+        body += '<line class="proj" x1="' + x(start).toFixed(1) + '" y1="' + y(0).toFixed(1) + '" x2="' + x(end).toFixed(1) + '" y2="' + y(vEnd).toFixed(1) + '"/>';
+        if (isFinite(eta) && eta <= reset) {
+          body += '<circle class="projdot" cx="' + x(eta).toFixed(1) + '" cy="' + y(100).toFixed(1) + '" r="2.4"/>';
         }
       }
     }
-    return '<svg class="spark" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none">' +
-      '<line class="cap" x1="' + P + '" y1="' + y(100).toFixed(1) + '" x2="' + (W - P) + '" y2="' + y(100).toFixed(1) + '"/>' +
-      '<polyline class="hist" points="' + line + '"/>' + proj + "</svg>" +
+    return '<svg class="spark" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none">' + body + "</svg>" +
       '<div class="sub" style="margin-top:2px">' + S.sparkNote + "</div>";
   }
 
@@ -662,6 +664,11 @@
     if (minutes >= 1440) return Math.round(minutes / 1440) + S.dayWindow;
     if (minutes >= 60) return Math.round(minutes / 60) + S.hourWindow;
     return minutes + S.minWindow;
+  }
+  function formatWhen(ms) {
+    return new Date(ms).toLocaleString(document.documentElement.lang === "ko" ? "ko-KR" : "en-US", {
+      weekday: "short", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit",
+    });
   }
   function countdown(atMs) {
     const ms = Number(atMs) - Date.now();

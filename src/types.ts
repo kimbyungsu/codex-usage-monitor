@@ -1,5 +1,5 @@
 import { UsageInsights } from "./insights";
-import type { LimitProjection, LimitSample, LimitWindow } from "./limits";
+import type { HoldReason, LimitSample, LimitWindow } from "./limits";
 
 export interface CodexAccount {
   type: string;
@@ -120,10 +120,16 @@ export interface UsageState {
    * primary/secondary 위치는 플랜에 따라 의미가 바뀌므로(5시간 창이 없으면 주간 창이 primary) 표시는 이것만 쓴다.
    */
   limits?: LimitWindow[];
-  /** 최근 사용률 추세로 추정한 한도 소진 예상(창 id별, 창 리셋 전 도달 시에만 reaches=true). Claude 방식과 동일. */
-  projection?: Record<string, LimitProjection | null> | null;
-  /** 한도 사용률 추세 샘플(창 id별 최근 2시간) — 대시보드 스파크라인용. */
+  /** 창별 '같은 창 안에서 사용률 하락(복원·보정)' 감지 여부 — 그 창이 끝날 때까지 소진 예상 보류. Claude와 동일. */
+  holds?: Record<string, boolean>;
+  /** 창별 보류 사유(같은 창 사용률 하락 / 기록 상한 초과로 추적 정보 부족). */
+  holdReasons?: Record<string, HoldReason>;
+  /** 창별 관측 샘플(현재 리셋 기준의 창 구간만) — 대시보드 그래프용. */
   samples?: Record<string, LimitSample[]>;
+  /** 마지막 한도 조회가 실패함(이전 관측을 표시 중). */
+  serverFailing?: boolean;
+  /** 계정 변경 알림 뒤 새 계정 값을 확인하는 중(표시값이 이전 계정 것일 수 있음). */
+  accountChecking?: boolean;
   tokenUsage?: TokenUsageNotification | null;
   history?: CodexHistoryUsage | null;
   lastRefresh?: number;

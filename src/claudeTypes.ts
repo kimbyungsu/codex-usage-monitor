@@ -3,7 +3,7 @@
 // - 토큰/비용/컨텍스트는 ~/.claude/projects/**/*.jsonl 트랜스크립트에서 집계한다.
 
 import { UsageInsights } from "./insights";
-import { LimitProjection, LimitSample, LimitWindow } from "./limits";
+import { HoldReason, LimitSample, LimitWindow } from "./limits";
 
 /** 캐시 효율 요약(이 PC · 최근 7일 · 추정). */
 export interface ClaudeCacheStats {
@@ -117,14 +117,25 @@ export interface ClaudeState {
   tokens?: ClaudeTokenUsage | null;
   lastPlanRefresh?: number;
   lastTokenRefresh?: number;
-  /** 최근 사용률 추세로 추정한 한도 소진 예상(창 id별). */
-  projection?: Record<string, LimitProjection | null> | null;
-  /** 한도 사용률 추세 샘플(창 id별 최근 2시간) — 대시보드 스파크라인용. */
+  /** 창별 '같은 창 안에서 사용률 하락(복원·보정)' 감지 여부 — 그 창이 끝날 때까지 소진 예상 보류. */
+  holds?: Record<string, boolean>;
+  /** 창별 보류 사유(같은 창 사용률 하락 / 기록 상한 초과로 추적 정보 부족). */
+  holdReasons?: Record<string, HoldReason>;
+  /** 창별 관측 샘플(현재 리셋 기준의 창 구간만) — 대시보드 그래프용. */
   samples?: Record<string, LimitSample[]>;
+  /** 마지막 플랜 조회가 실패함(이전 관측을 표시 중). */
+  planFailing?: boolean;
+  /** 조회 중 계정·설정이 바뀌어 새 계정 값을 확인하는 중(표시값이 이전 계정 것일 수 있음). */
+  planAccountChecking?: boolean;
   /** 플랜 한도 API 관련 *실제* 오류(토큰 만료·인증서 등) — 알림 카드로 표시. */
   planError?: string;
   /** 일시적 요청 제한(429) 안내 — 알림이 아니라 차분한 상태 문구로 표시. */
   planRateLimited?: string;
+  /**
+   * 로그인 토큰이 만료돼 Claude Code 가 갱신하기를 기다리는 중(확장은 토큰을 갱신·저장하지 않음) —
+   * 오류가 아니라 '마지막 확인 시각'을 알리는 차분한 상태 문구.
+   */
+  planWaiting?: string;
   /** 토큰 집계 관련 오류(트랜스크립트 폴더 없음 등). */
   tokenError?: string;
 }
