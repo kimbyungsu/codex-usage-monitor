@@ -565,7 +565,7 @@ const until = async (cond, ms = 3000) => {
     await sleep(1);
   }
 };
-const { LimitHistoryStore, historyAccountKey, appendPoint, mergeChartSamples, thinKeepEnds } = require("../out/limitHistory.js");
+const { LimitHistoryStore, historyAccountKey, appendPoint, mergeChartSamples, thinKeepEnds, chartSeries } = require("../out/limitHistory.js");
 const HOUR = 3600e3;
 const histWin = (R, u, O, id = "weekly_all") => ({ id, span: "weekly", windowMins: WEEK, kind: "weekly_all", usedPercent: u, resetsAtMs: R, observedAtMs: O, observedSource: "received" });
 const withHistDir = async (fn) => {
@@ -3082,6 +3082,556 @@ async function serviceTests() {
     });
     assert.strictEqual(n, 0);
     assert.strictEqual(localRuns, 0);
+  });
+
+  // ---------- 0.10.1: 값을 받지 못한 구간(흐린 선) · 받은 마지막 값까지 · 리셋 뒤 새 시작 ----------
+  const { extendCover, markGaps, chartUpTo, coverGapFor, DEFAULT_COVER_GAP_MS } = require("../out/limits.js");
+  const MINUTE = 60_000;
+
+  await atest("새 값을 계속 받던 구간: 새 관측의 관측 시각이 앞 관측과 30분 안이면 이어지고 더 벌어지면 새 구간 · 되풀이·옛 관측 시각은 아무것도 바꾸지 않음", async () => {
+    const T = Date.UTC(2026, 10, 10, 0, 0, 0);
+    const c = [];
+    extendCover(c, T, DEFAULT_COVER_GAP_MS);
+    extendCover(c, T, DEFAULT_COVER_GAP_MS); // 같은 관측 시각 되풀이 → 변화 없음
+    extendCover(c, T + 29 * MINUTE, DEFAULT_COVER_GAP_MS); // 29분 → 이어짐
+    assert.deepStrictEqual(c, [[T, T + 29 * MINUTE]]);
+    extendCover(c, T + 10 * MINUTE, DEFAULT_COVER_GAP_MS); // 옛 관측 시각 → 변화 없음
+    assert.deepStrictEqual(c, [[T, T + 29 * MINUTE]]);
+    extendCover(c, T + 60 * MINUTE, DEFAULT_COVER_GAP_MS); // 31분 → 새 구간
+    assert.deepStrictEqual(c, [[T, T + 29 * MINUTE], [T + 60 * MINUTE, T + 60 * MINUTE]]);
+    assert.strictEqual(coverGapFor(120_000), DEFAULT_COVER_GAP_MS, "기본 조회 간격(2분)이면 30분");
+    assert.strictEqual(coverGapFor(20 * MINUTE), 60 * MINUTE, "조회 간격이 길면 그 3배");
+  });
+
+  await atest("흐린 구간 표시: 여러 출처 구간을 합쳐(사이 30분 이내면 이어짐) 두 점이 한 구간 안이면 이어진 것, 아니면 gap — 첫 점엔 붙이지 않음", async () => {
+    const T = Date.UTC(2026, 10, 10, 0, 0, 0);
+    const pts = [0, 60, 125, 400, 410].map((m, i) => ({ ts: T + m * MINUTE, v: 10 + i }));
+    const a = [[T, T + 60 * MINUTE, 0]]; // 창 A: 0~60분
+    const b = [[T + 80 * MINUTE, T + 125 * MINUTE, 0]]; // 창 B: 80~125분(A 끝과 20분 차 → 이어짐)
+    const live = [[T + 400 * MINUTE, T + 410 * MINUTE, 0]];
+    const out = markGaps(pts, [a, b, live], DEFAULT_COVER_GAP_MS);
+    assert.deepStrictEqual(out.map((p) => Boolean(p.gap)), [false, false, false, true, false]);
+    assert.deepStrictEqual(out.map((p) => p.v), [10, 11, 12, 13, 14], "값·시각은 그대로");
+    assert.ok(!("gap" in out[0]) && !("gap" in out[1]), "이어진 점에는 표시 없음");
+    assert.deepStrictEqual(markGaps(pts.slice(0, 2), [], DEFAULT_COVER_GAP_MS).map((p) => Boolean(p.gap)), [false, true], "구간 정보가 없으면 모른다 → gap");
+  });
+
+  await atest("그래프 상한: 지금과 받아들인 관측 시각 중 늦은 쪽(서버 관측 시각이 PC 보다 앞서도), 단 리셋을 넘지 않음", async () => {
+    const now = Date.now();
+    assert.strictEqual(chartUpTo(histWin(now + 10 * HOUR, 5, now + 1000), now), now + 1000);
+    assert.strictEqual(chartUpTo(histWin(now + 10 * HOUR, 5, now - 1000), now), now);
+    assert.strictEqual(chartUpTo(histWin(now - HOUR, 5, now - 2 * HOUR), now), now - HOUR, "리셋이 지났으면 리셋까지");
+  });
+
+  await atest("이력 저장소: 계속 받던 구간을 함께 저장·다른 창이 읽음, 0.10.0 기록(구간 없음)은 처음~마지막을 한 구간으로, 깨진 구간은 버림", async () => {
+    await withHistDir(async (dir) => {
+      const fs = require("fs");
+      const now = Date.now();
+      const R = now + 2 * 24 * HOUR;
+      const acct = historyAccountKey("claude", "acct-A");
+      const w1 = new LimitHistoryStore(dir, "w1");
+      w1.record(acct, [histWin(R, 10, now - 5 * HOUR)], () => R);
+      w1.record(acct, [histWin(R, 12, now - 4.9 * HOUR)], () => R);
+      w1.record(acct, [histWin(R, 30, now - HOUR)], () => R); // 4시간 가까이 끊긴 뒤
+      w1.flush();
+      fs.writeFileSync(
+        path.join(dir, "limit-history-legacy-1.json"),
+        JSON.stringify({ v: 1, pid: process.pid, entries: [{ account: acct, id: "weekly_all", len: WEEK, R0: R, rMin: R, rMax: R, points: [[now - 10 * HOUR, 2], [now - 8 * HOUR, 4]] }] }),
+      );
+      fs.writeFileSync(
+        path.join(dir, "limit-history-broken-1.json"),
+        JSON.stringify({ v: 1, pid: process.pid, entries: [{ account: acct, id: "weekly_all", len: WEEK, R0: R, rMin: R, rMax: R, points: [[now - 7 * HOUR, 5]], cover: [null, ["x", 1], [now - 6 * HOUR, now - 7 * HOUR], [now - 7 * HOUR, now - 7 * HOUR, "bad"]] }] }),
+      );
+      const reader = new LimitHistoryStore(dir, "reader");
+      const data = reader.chartDataFor(acct, histWin(R, 30, now), now - 24 * HOUR, now);
+      const spans = data.cover.map((s) => [s[0], s[1]]).sort((a, b) => a[0] - b[0]);
+      assert.deepStrictEqual(spans, [
+        [now - 10 * HOUR, now - 8 * HOUR], // 0.10.0 기록: 처음~마지막
+        [now - 7 * HOUR, now - 7 * HOUR], // 깨진 구간 중 쓸 수 있는 것만(받은 시각이 깨지면 0)
+        [now - 5 * HOUR, now - 4.9 * HOUR],
+        [now - HOUR, now - HOUR],
+      ]);
+      assert.deepStrictEqual(data.points.map((p) => p.v).sort((a, b) => a - b), [2, 4, 5, 10, 12, 30]);
+      reader.dispose();
+      w1.dispose();
+    });
+  });
+
+  await atest("Claude 서비스: 다른 창이 사흘 전 받은 값들과 지금 값 사이(값을 받지 못한 구간)만 흐린 구간으로 표시 — 계속 받은 구간은 그대로", async () => {
+    await withHistDir(async (dir) => {
+      const now = Date.now();
+      const R = now + 2 * 24 * HOUR;
+      const acct = historyAccountKey("claude", "acct-A");
+      const old = new LimitHistoryStore(dir, "old");
+      for (let i = 0; i <= 12; i++) {
+        const t = now - 3 * 24 * HOUR + i * 10 * MINUTE;
+        old.record(acct, [histWin(R, 10 + i, t)], () => R);
+      }
+      old.flush();
+      claudeApi.readAccountInfo = () => ({ planDisplayName: "Ultra", identity: "acct-A" });
+      claudeApi.fetchPlanUsage = async () => ({ usage: { windows: [histWin(R, 40, Date.now())], extraUsage: null }, subscriptionType: "max", loginKey: "login-test" });
+      const store = new LimitHistoryStore(dir, "this");
+      const svc = new ClaudeService(output, store);
+      try {
+        await svc.refreshPlan(true);
+        const s = svc.currentState.samples.weekly_all;
+        assert.deepStrictEqual(s.map((p) => p.v), [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 40]);
+        assert.deepStrictEqual(s.map((p) => Boolean(p.gap)), [...Array(13).fill(false), true], "사흘 공백만 흐림");
+      } finally {
+        svc.dispose();
+        store.dispose();
+        old.dispose();
+      }
+    });
+  });
+
+  await atest("Claude 서비스: VS Code 를 켜 둔 채 3시간 같은 값(점은 처음·끝만 남음)이어도, 점이 그래프 상한(400)을 넘어 솎여도 계속 받은 구간은 흐리게 표시하지 않음", async () => {
+    await withHistDir(async (dir) => {
+      const now = Date.now();
+      const R = now + 2 * 24 * HOUR;
+      const acct = historyAccountKey("claude", "acct-A");
+      const old = new LimitHistoryStore(dir, "old");
+      // 사흘 전부터 2분마다 오르는 값 1100개(그래프로 보낼 때 상한 400 으로 솎임)
+      for (let i = 0; i < 1100; i++) {
+        const t = now - 3 * 24 * HOUR + i * 2 * MINUTE;
+        old.record(acct, [histWin(R, Math.min(39, i / 30), t)], () => R);
+      }
+      // 한참 끊긴 뒤 3시간 동안 2분마다 40% (같은 값 → 저장은 처음·끝 두 점)
+      for (let t = now - 3 * HOUR; t <= now - 5 * MINUTE; t += 2 * MINUTE) old.record(acct, [histWin(R, 40, t)], () => R);
+      old.flush();
+      claudeApi.readAccountInfo = () => ({ planDisplayName: "Ultra", identity: "acct-A" });
+      claudeApi.fetchPlanUsage = async () => ({ usage: { windows: [histWin(R, 40, Date.now())], extraUsage: null }, subscriptionType: "max", loginKey: "login-test" });
+      const store = new LimitHistoryStore(dir, "this");
+      const svc = new ClaudeService(output, store);
+      try {
+        await svc.refreshPlan(true);
+        const s = svc.currentState.samples.weekly_all;
+        assert.ok(s.length <= 400, `그래프 점 상한: ${s.length}`);
+        const gaps = s.map((p, i) => (p.gap ? i : -1)).filter((i) => i >= 0);
+        assert.strictEqual(gaps.length, 1, `흐린 구간은 사흘 기록 끝 → 3시간 전 사이 하나뿐: ${gaps}`);
+        const g = s[gaps[0]];
+        assert.strictEqual(g.v, 40);
+        assert.ok(Math.abs(g.ts - (now - 3 * HOUR)) < MINUTE, "3시간 같은 값 구간의 시작에서만 흐림");
+        assert.ok(!s[s.length - 1].gap, "같은 값으로 계속 받은 3시간 → 지금은 이어짐");
+      } finally {
+        svc.dispose();
+        store.dispose();
+        old.dispose();
+      }
+    });
+  });
+
+  await atest("Claude 서비스: 서버가 붙인 관측 시각이 PC 시계보다 조금 앞서도 방금 받은 값이 실선 끝에 들어감(카드 값과 실선 끝 일치)", async () => {
+    await withHistDir(async (dir) => {
+      const now = Date.now();
+      const R = now + 2 * 24 * HOUR;
+      let next = { usage: { windows: [histWin(R, 9, now - MINUTE)], extraUsage: null }, subscriptionType: "max", loginKey: "login-test" };
+      claudeApi.readAccountInfo = () => ({ planDisplayName: "Ultra", identity: "acct-A" });
+      claudeApi.fetchPlanUsage = async () => next;
+      const store = new LimitHistoryStore(dir, "this");
+      const svc = new ClaudeService(output, store);
+      try {
+        await svc.refreshPlan(true);
+        next = { usage: { windows: [histWin(R, 10, Date.now() + 2000)], extraUsage: null }, subscriptionType: "max", loginKey: "login-test" };
+        await svc.refreshPlan(true);
+        const st = svc.currentState;
+        assert.strictEqual(st.plan.windows[0].usedPercent, 10);
+        assert.deepStrictEqual(st.samples.weekly_all.map((p) => p.v), [9, 10], "미래로 보이는 마지막 관측도 실선에 포함");
+      } finally {
+        svc.dispose();
+        store.dispose();
+      }
+    });
+  });
+
+  await atest("리셋 뒤 실선 새 시작: 지난 창 40%·70% 뒤 새 창 값을 받으면 그 첫 관측부터(같은 서비스·저장 기록을 공유한 다른 창 모두) — 하락 보류 없음", async () => {
+    await withHistDir(async (dir) => {
+      const now = Date.now();
+      const R1 = now - HOUR;
+      const R2 = R1 + WEEK * MINUTE;
+      let next;
+      claudeApi.readAccountInfo = () => ({ planDisplayName: "Ultra", identity: "acct-A" });
+      claudeApi.fetchPlanUsage = async () => next;
+      const s1 = new LimitHistoryStore(dir, "first");
+      const svc = new ClaudeService(output, s1);
+      try {
+        next = { usage: { windows: [histWin(R1, 40, now - 3 * HOUR)], extraUsage: null }, subscriptionType: "max", loginKey: "login-test" };
+        await svc.refreshPlan(true);
+        next = { usage: { windows: [histWin(R1, 70, now - 2 * HOUR)], extraUsage: null }, subscriptionType: "max", loginKey: "login-test" };
+        await svc.refreshPlan(true);
+        assert.deepStrictEqual(svc.currentState.samples.weekly_all.map((p) => p.v), [40, 70]);
+        next = { usage: { windows: [histWin(R2, 3, now - 10 * MINUTE)], extraUsage: null }, subscriptionType: "max", loginKey: "login-test" };
+        await svc.refreshPlan(true);
+        assert.deepStrictEqual(svc.currentState.samples.weekly_all.map((p) => p.v), [3], "새 창 첫 관측부터");
+        next = { usage: { windows: [histWin(R2, 9, now - 5 * MINUTE)], extraUsage: null }, subscriptionType: "max", loginKey: "login-test" };
+        await svc.refreshPlan(true);
+        assert.deepStrictEqual(svc.currentState.samples.weekly_all.map((p) => p.v), [3, 9]);
+        assert.ok(!svc.currentState.holds.weekly_all, "지난 창 70% 와 비교한 하락 보류 아님");
+        s1.flush();
+      } finally {
+        svc.dispose();
+        s1.dispose();
+      }
+      const s2 = new LimitHistoryStore(dir, "second");
+      const other = new ClaudeService(output, s2);
+      try {
+        next = { usage: { windows: [histWin(R2, 10, Date.now())], extraUsage: null }, subscriptionType: "max", loginKey: "login-test" };
+        await other.refreshPlan(true);
+        assert.deepStrictEqual(other.currentState.samples.weekly_all.map((p) => p.v), [3, 9, 10], "다른 창도 지난 창 점 없이 새 창부터");
+      } finally {
+        other.dispose();
+        s2.dispose();
+      }
+    });
+  });
+
+  await atest("Codex 서비스: 같은 연결에서 몇 분 간격으로 이어 받은 값(관측 시각 = 받은 시각)은 흐린 구간 없음", async () => {
+    const now = Date.now();
+    const R = now + 2 * 24 * HOUR;
+    let used = 10;
+    FakeClient.instances = [];
+    FakeClient.handler = async (m) =>
+      m === "account/read" ? account : { rateLimits: { limitId: "codex", primary: { usedPercent: used, windowDurationMins: WEEK, resetsAt: R / 1000 }, secondary: null } };
+    const svc = new UsageService(output);
+    try {
+      await svc.reconnect();
+      const id = svc.currentState.limits[0].id;
+      await sleep(5);
+      used = 12;
+      await svc.refreshServer();
+      const s = svc.currentState.samples[id];
+      assert.deepStrictEqual(s.map((p) => p.v), [10, 12]);
+      assert.ok(!s.some((p) => p.gap), JSON.stringify(s));
+    } finally {
+      svc.dispose();
+    }
+  });
+
+  await atest("이력 저장소: 끊긴 구간 양쪽이 같은 값이어도 저장할 때 하나로 줄이지 않음(경계 점 유지) — 구간 안의 같은 값만 줄임", async () => {
+    await withHistDir(async (dir) => {
+      const now = Date.now();
+      const R = now + 2 * 24 * HOUR;
+      const acct = historyAccountKey("claude", "acct-A");
+      const st = new LimitHistoryStore(dir, "w");
+      const T = now - 10 * HOUR;
+      const put = (t) => st.record(acct, [histWin(R, 40, t)], () => R);
+      put(T);
+      put(T + 2 * MINUTE);
+      put(T + 4 * MINUTE); // 1구간: 같은 값 세 점 → 처음·끝
+      put(T + 5 * HOUR); // 5시간 끊긴 뒤 2구간 시작(같은 값)
+      put(T + 5 * HOUR + 2 * MINUTE);
+      put(T + 5 * HOUR + 4 * MINUTE);
+      const data = st.chartDataFor(acct, histWin(R, 40, now), 0, now);
+      assert.deepStrictEqual(
+        data.points.map((p) => (p.ts - T) / MINUTE),
+        [0, 4, 300, 304],
+        "1구간 끝(4분)과 2구간 시작(300분)이 남음",
+      );
+      const s = chartSeries([data.points], [data.cover], 0, now);
+      assert.deepStrictEqual(s.map((p) => [(p.ts - T) / MINUTE, Boolean(p.gap)]), [[0, false], [4, false], [300, true], [304, false]]);
+      st.dispose();
+    });
+  });
+
+  await atest("지금 기억하는 점이 상한(300)을 넘어 앞쪽을 솎아도 값을 받던 구간의 시작·끝 점은 남아 흐린 구간이 정확히 그 사이만", async () => {
+    const wt = new LimitWatch();
+    const T = Date.now() - 2 * 24 * HOUR;
+    const R = T + 5 * 24 * HOUR;
+    const obsAt = (t, u) => wt.observe([histWin(R, u, t)]);
+    let u = 0;
+    for (let i = 0; i < 250; i++) obsAt(T + i * 2 * MINUTE, (u += 0.01)); // 1구간 약 8시간
+    const end1 = T + 249 * 2 * MINUTE;
+    const start2 = end1 + 6 * HOUR; // 6시간 끊김
+    for (let i = 0; i < 250; i++) obsAt(start2 + i * 2 * MINUTE, (u += 0.01));
+    const w = histWin(R, u, start2 + 249 * 2 * MINUTE);
+    const samples = wt.samplesFor(w);
+    assert.ok(samples.length <= 300 + 4, `솎임: ${samples.length}`);
+    assert.ok(samples.some((p) => p.ts === end1), "1구간 끝 점 유지");
+    assert.ok(samples.some((p) => p.ts === start2), "2구간 시작 점 유지");
+    const marked = markGaps(samples, [wt.coverFor(w)], DEFAULT_COVER_GAP_MS);
+    const gaps = marked.map((p, i) => (p.gap ? i : -1)).filter((i) => i >= 0);
+    assert.strictEqual(gaps.length, 1);
+    assert.strictEqual(marked[gaps[0]].ts, start2);
+    assert.strictEqual(marked[gaps[0] - 1].ts, end1);
+  });
+
+  await atest("Claude·Codex 서비스: 계정 정보를 읽지 못해 저장 기록 없이 그릴 때도, 새 값의 관측 시각이 3시간 벌어지면 그 사이만 흐린 구간(2분 간격이면 이어짐)", async () => {
+    const realNow = Date.now;
+    const base = realNow() - 5 * HOUR;
+    let fake = base;
+    Date.now = () => fake;
+    try {
+      // Claude: 식별 없음(저장 안 함) — 같은 토큰이라 같은 주인으로 이어 그림
+      const R = base + 2 * 24 * HOUR;
+      let next;
+      claudeApi.readAccountInfo = () => ({ planDisplayName: "Ultra", identity: null });
+      claudeApi.fetchPlanUsage = async () => next;
+      const svc = new ClaudeService(output);
+      try {
+        for (const [dt, u] of [[0, 10], [2 * MINUTE, 11], [3 * HOUR, 30], [3 * HOUR + 2 * MINUTE, 31]]) {
+          fake = base + dt;
+          next = { usage: { windows: [histWin(R, u, fake)], extraUsage: null }, subscriptionType: "max", loginKey: "login-test" };
+          await svc.refreshPlan(true);
+        }
+        const s = svc.currentState.samples.weekly_all;
+        assert.deepStrictEqual(s.map((p) => [p.v, Boolean(p.gap)]), [[10, false], [11, false], [30, true], [31, false]]);
+      } finally {
+        svc.dispose();
+      }
+      // Codex: 식별 없음 — 받은 시각(응답 도착)으로 판단
+      let used = 10;
+      FakeClient.instances = [];
+      FakeClient.handler = async (m) =>
+        m === "account/read"
+          ? { account: null, requiresOpenaiAuth: false }
+          : { rateLimits: { limitId: "codex", primary: { usedPercent: used, windowDurationMins: WEEK, resetsAt: R / 1000 }, secondary: null } };
+      const cx = new UsageService(output);
+      try {
+        fake = base;
+        await cx.reconnect();
+        const id = cx.currentState.limits[0].id;
+        for (const [dt, u] of [[2 * MINUTE, 11], [3 * HOUR, 30], [3 * HOUR + 2 * MINUTE, 31]]) {
+          fake = base + dt;
+          used = u;
+          await cx.refreshServer();
+        }
+        const s = cx.currentState.samples[id];
+        assert.deepStrictEqual(s.map((p) => [p.v, Boolean(p.gap)]), [[10, false], [11, false], [30, true], [31, false]]);
+      } finally {
+        cx.dispose();
+      }
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  await atest("Claude 서비스: 응답은 20분마다 받았어도 서버가 같은 옛 관측 시각만 되풀이해 새 값의 관측 시각이 40분 벌어지면 그 사이는 흐린 구간(새 값을 받지 못함)", async () => {
+    const realNow = Date.now;
+    const base = realNow() - 5 * HOUR;
+    let fake = base;
+    Date.now = () => fake;
+    try {
+      const R = base + 2 * 24 * HOUR;
+      let next;
+      claudeApi.readAccountInfo = () => ({ planDisplayName: "Ultra", identity: null });
+      claudeApi.fetchPlanUsage = async () => next;
+      const svc = new ClaudeService(output);
+      try {
+        // 받은 시각: 0·20·40분, 서버 관측 시각: 0·0(되풀이)·40분 → 새 값은 0분과 40분뿐
+        for (const [dt, O, u] of [[0, 0, 10], [20 * MINUTE, 0, 10], [40 * MINUTE, 40 * MINUTE, 12]]) {
+          fake = base + dt;
+          next = { usage: { windows: [histWin(R, u, base + O)], extraUsage: null }, subscriptionType: "max", loginKey: "login-test" };
+          await svc.refreshPlan(true);
+        }
+        const s = svc.currentState.samples.weekly_all;
+        assert.deepStrictEqual(s.map((p) => [p.v, Boolean(p.gap)]), [[10, false], [12, true]], JSON.stringify(s));
+      } finally {
+        svc.dispose();
+      }
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  await atest("이력 저장소: 한 창 기록이 상한(4000점)을 넘어 솎여도 값을 받던 구간의 시작·끝 점은 남음", async () => {
+    await withHistDir(async (dir) => {
+      const now = Date.now();
+      const R = now + 3 * 24 * HOUR;
+      const acct = historyAccountKey("codex", "acct-A");
+      const st = new LimitHistoryStore(dir, "w");
+      const T = now - 6 * 24 * HOUR;
+      let i = 0;
+      let t = T;
+      for (; i < 2500; i++, t += MINUTE) st.record(acct, [histWin(R, i * 0.01, t)], () => R);
+      const end1 = t - MINUTE;
+      const start2 = end1 + 5 * HOUR;
+      t = start2;
+      for (let k = 0; k < 2000; k++, i++, t += MINUTE) st.record(acct, [histWin(R, i * 0.01, t)], () => R);
+      const data = st.chartDataFor(acct, histWin(R, 1, now), 0, now);
+      assert.ok(data.points.length < 4000, `솎임: ${data.points.length}`);
+      const ts = new Set(data.points.map((p) => p.ts));
+      assert.ok(ts.has(end1), "1구간 끝 점 유지");
+      assert.ok(ts.has(start2), "2구간 시작 점 유지");
+      const s = chartSeries([data.points], [data.cover], 0, now);
+      const gaps = s.filter((p) => p.gap);
+      assert.strictEqual(gaps.length, 1);
+      assert.strictEqual(gaps[0].ts, start2);
+      st.dispose();
+    });
+  });
+
+  await atest("Claude 서비스: 서버 관측 시각이 받은 시각보다 2분 늦게 붙어 응답 간격이 31분이어도 관측 시각 사이가 29분이면 이어진 것(그래프·예상과 같은 관측 시각 기준)", async () => {
+    const realNow = Date.now;
+    const base = realNow() - 5 * HOUR;
+    let fake = base;
+    Date.now = () => fake;
+    try {
+      const R = base + 2 * 24 * HOUR;
+      let next;
+      claudeApi.readAccountInfo = () => ({ planDisplayName: "Ultra", identity: null });
+      claudeApi.fetchPlanUsage = async () => next;
+      const svc = new ClaudeService(output);
+      try {
+        for (const [dt, O, u] of [[MINUTE, MINUTE, 10], [32 * MINUTE, 30 * MINUTE, 20]]) {
+          fake = base + dt;
+          next = { usage: { windows: [histWin(R, u, base + O)], extraUsage: null }, subscriptionType: "max", loginKey: "login-test" };
+          await svc.refreshPlan(true);
+        }
+        assert.deepStrictEqual(svc.currentState.samples.weekly_all.map((p) => [p.v, Boolean(p.gap)]), [[10, false], [20, false]]);
+      } finally {
+        svc.dispose();
+      }
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  await atest("Claude 서비스: 받아들이지 않은 옛 관측 응답이 사이에 와도 구간을 늘리지 않아, 실행 중 그래프와 다시 켠 뒤(저장 기록) 그래프가 같음", async () => {
+    await withHistDir(async (dir) => {
+      const now = Date.now();
+      const R = now + 2 * 24 * HOUR;
+      const t0 = now - 3 * HOUR;
+      let next;
+      claudeApi.readAccountInfo = () => ({ planDisplayName: "Ultra", identity: "acct-A" });
+      claudeApi.fetchPlanUsage = async () => next;
+      const s1 = new LimitHistoryStore(dir, "first");
+      const svc = new ClaudeService(output, s1);
+      try {
+        next = { usage: { windows: [histWin(R, 10, t0 + 2 * MINUTE)], extraUsage: null }, subscriptionType: "max", loginKey: "login-test" };
+        await svc.refreshPlan(true);
+        for (let k = 0; k < 5; k++) {
+          next = { usage: { windows: [histWin(R, 9, t0 + MINUTE)], extraUsage: null }, subscriptionType: "max", loginKey: "login-test" }; // 옛 관측(거부)
+          await svc.refreshPlan(true);
+        }
+        next = { usage: { windows: [histWin(R, 20, t0 + 62 * MINUTE)], extraUsage: null }, subscriptionType: "max", loginKey: "login-test" };
+        await svc.refreshPlan(true);
+        assert.deepStrictEqual(svc.currentState.samples.weekly_all.map((p) => [p.v, Boolean(p.gap)]), [[10, false], [20, true]], "실행 중");
+        s1.flush();
+      } finally {
+        svc.dispose();
+        s1.dispose();
+      }
+      const s2 = new LimitHistoryStore(dir, "second");
+      const again = new ClaudeService(output, s2);
+      try {
+        next = { usage: { windows: [histWin(R, 21, t0 + 64 * MINUTE)], extraUsage: null }, subscriptionType: "max", loginKey: "login-test" };
+        await again.refreshPlan(true);
+        assert.deepStrictEqual(again.currentState.samples.weekly_all.map((p) => [p.v, Boolean(p.gap)]), [[10, false], [20, true], [21, false]], "다시 켠 뒤");
+      } finally {
+        again.dispose();
+        s2.dispose();
+      }
+    });
+  });
+
+  await atest("이력 저장소: 구간 칸이 있는데 형식이 깨졌으면(문자열·null) 0.10.0 기록으로 보지 않고 구간 없음 — 그 기록의 점 사이는 흐린 구간", async () => {
+    await withHistDir(async (dir) => {
+      const fs = require("fs");
+      const now = Date.now();
+      const R = now + 2 * 24 * HOUR;
+      const acct = historyAccountKey("claude", "acct-A");
+      for (const [name, cover] of [["str", "corrupted"], ["nul", null]]) {
+        fs.writeFileSync(
+          path.join(dir, `limit-history-${name}-1.json`),
+          JSON.stringify({ v: 1, pid: process.pid, entries: [{ account: acct, id: `weekly_all`, len: WEEK, R0: R, rMin: R, rMax: R, points: [[now - 8 * HOUR, 5], [now - 2 * HOUR, 9]], cover }] }),
+        );
+        const reader = new LimitHistoryStore(dir, "reader");
+        const data = reader.chartDataFor(acct, histWin(R, 9, now), 0, now);
+        assert.deepStrictEqual(data.cover, [], name);
+        const s = chartSeries([data.points], [data.cover], 0, now);
+        assert.deepStrictEqual(s.map((p) => [p.v, Boolean(p.gap)]), [[5, false], [9, true]], name);
+        reader.dispose();
+        fs.unlinkSync(path.join(dir, `limit-history-${name}-1.json`));
+      }
+    });
+  });
+
+  await atest("구간 상한: 30일 창은 30분 기준으로 상한(2000)에 닿지 않고, 그보다 긴 창에서 닿으면 가장 오래된 구간과 그 점을 함께 버려 남은 점은 잘못 흐려지지 않음(메모리·저장 모두)", async () => {
+    const { COVER_CAP } = require("../out/limits.js");
+    assert.ok(Math.floor((30 * 24 * 60) / 30) + 1 < COVER_CAP, "30일 창의 최대 구간 수 < 상한");
+    await withHistDir(async (dir) => {
+      const now = Date.now();
+      const LONG = 200 * 24 * 60; // 200일짜리(비정상적으로 긴) 창
+      const R = now + 2 * 24 * HOUR;
+      const win = (u, O) => ({ ...histWin(R, u, O), windowMins: LONG });
+      const acct = historyAccountKey("codex", "acct-A");
+      const wt = new LimitWatch();
+      const st = new LimitHistoryStore(dir, "w");
+      const T0 = now - (COVER_CAP + 5) * 40 * MINUTE;
+      const firsts = [];
+      for (let k = 0; k < COVER_CAP + 5; k++) {
+        const a = T0 + k * 40 * MINUTE; // 구간마다 8분 간격 두 관측, 다음 구간까지 32분 공백
+        firsts.push(a);
+        for (const t of [a, a + 8 * MINUTE]) {
+          const w = win(10, t);
+          wt.observe([w]);
+          st.record(acct, [w], () => R);
+        }
+      }
+      const last = win(10, T0 + (COVER_CAP + 4) * 40 * MINUTE + 8 * MINUTE);
+      const liveCover = wt.coverFor(last);
+      assert.strictEqual(liveCover.length, COVER_CAP);
+      assert.strictEqual(liveCover[0][0], firsts[5], "가장 오래된 5개 구간을 버림");
+      const live = wt.samplesFor(last);
+      assert.ok(live.every((p) => p.ts >= firsts[5]), "버린 구간의 점도 메모리에서 버림");
+      const liveMarked = markGaps(live, [liveCover], DEFAULT_COVER_GAP_MS);
+      assert.ok(!liveMarked[1].gap, "남은 첫 구간 안은 이어짐");
+      st.flush();
+      const reader = new LimitHistoryStore(dir, "reader");
+      const data = reader.chartDataFor(acct, last, 0, now + HOUR);
+      assert.strictEqual(data.cover.length, COVER_CAP);
+      assert.ok(data.points.every((p) => p.ts >= firsts[5]), "버린 구간의 점도 저장에서 버림");
+      const s = chartSeries([data.points], [data.cover], 0, now + HOUR, DEFAULT_COVER_GAP_MS, 100000);
+      assert.strictEqual(s[0].ts, firsts[5]);
+      assert.ok(!s[1].gap, "남은 첫 구간 안은 다시 읽어도 이어짐");
+      reader.dispose();
+      st.dispose();
+    });
+  });
+
+  await atest("대시보드 그래프: 이어진 구간은 진한 실선, 흐린 구간(gap)은 흐린 선, 앞뒤가 끊긴 외딴 점은 작은 점으로 그림", async () => {
+    const vm = require("vm");
+    const S = require("../out/i18n.js").webviewStrings("ko");
+    const els = {};
+    const mk = (id) => ({
+      id, innerHTML: "", textContent: id === "bootstrap" ? JSON.stringify(S) : "", title: "", value: "", style: {}, dataset: {}, children: [],
+      addEventListener() {}, insertBefore() {}, appendChild() {}, querySelector: () => null, querySelectorAll: () => [],
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false }, setAttribute() {}, getAttribute: () => null, closest: () => null,
+    });
+    const el = (id) => (els[id] = els[id] || mk(id));
+    const listeners = {};
+    const win = { addEventListener: (t, f) => (listeners[t] = f) };
+    win.window = win;
+    const ctx = {
+      document: { getElementById: el, querySelector: () => null, querySelectorAll: () => [], createElement: () => mk("tmp"), addEventListener() {}, body: mk("body"), documentElement: mk("html") },
+      window: win, addEventListener: win.addEventListener,
+      acquireVsCodeApi: () => ({ postMessage() {}, getState: () => null, setState() {} }),
+      console, setTimeout, clearTimeout, setInterval, clearInterval,
+    };
+    vm.createContext(ctx);
+    vm.runInContext(require("fs").readFileSync(path.join(__dirname, "..", "media", "main.js"), "utf8"), ctx);
+    const now = Date.now();
+    const start = now - 3 * 24 * HOUR;
+    const R = start + WEEK * MINUTE;
+    const win1 = { ...histWin(R, 50, now), label: "주간", forecast: { startMs: start, resetsAtMs: R, state: "safe" } };
+    const series = [
+      { ts: start + HOUR, v: 5 }, { ts: start + 2 * HOUR, v: 8 }, // 이어진 구간
+      { ts: start + 30 * HOUR, v: 20, gap: true }, // 흐림 → 외딴 점
+      { ts: start + 60 * HOUR, v: 40, gap: true }, { ts: start + 61 * HOUR, v: 45 }, { ts: now, v: 50 },
+    ];
+    listeners.message({ data: { type: "state", state: { connected: true, limits: [] }, claude: { available: true, plan: { windows: [win1] }, samples: { weekly_all: series } }, extraPaths: [], codexExtraPaths: [] } });
+    const html = el("claudeRoot").innerHTML;
+    const count = (re) => (html.match(re) || []).length;
+    assert.strictEqual(count(/<polyline class="hist"/g), 2, html);
+    assert.strictEqual(count(/<line class="histgap"/g), 2, html);
+    assert.strictEqual(count(/<circle class="histpt"/g), 1, html);
+    // 관측이 하나뿐(새 창 첫 값) — 평균 점선을 그릴 수 없는 상태여도 파란 점은 보인다.
+    for (const state of ["idle", "held", "safe"]) {
+      const one = { ...win1, forecast: { startMs: start, resetsAtMs: R, state } };
+      listeners.message({ data: { type: "state", state: { connected: true, limits: [] }, claude: { available: true, plan: { windows: [one] }, samples: { weekly_all: [{ ts: start + HOUR, v: 0 }] } }, extraPaths: [], codexExtraPaths: [] } });
+      const h = el("claudeRoot").innerHTML;
+      assert.strictEqual((h.match(/<circle class="histpt"/g) || []).length, 1, `${state}: ${h}`);
+    }
   });
 }
 

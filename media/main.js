@@ -619,7 +619,7 @@
 
   /**
    * 한도 사용률 그래프: 가로축 = 창 시작 → 리셋(서버가 바꿔 보낸 최신 기준).
-   * 실선 = 이 창에서 관측한 사용률, 점선 = 창 시작 이후 평균이 유지될 때(공통 계산 결과).
+   * 실선 = 이 창에서 관측한 사용률(값을 받지 못한 긴 구간은 흐린 선), 점선 = 창 시작 이후 평균이 유지될 때(공통 계산 결과).
    * 보류·만료·계산 불가 상태에선 점선을 그리지 않고, 샘플이 적어도 점선은 그린다.
    */
   const MODEL_STATES = { before: 1, boundary: 1, safe: 1 };
@@ -630,15 +630,36 @@
     let pts = (series || []).filter((p) => typeof p.v === "number" && isFinite(p.ts));
     if (hasWindow) pts = pts.filter((p) => p.ts >= start && p.ts <= reset);
     const model = hasWindow && MODEL_STATES[fc.state] && !fc.etaPassed;
-    if (!model && pts.length < 2) return "";
+    if (!model && pts.length < 1) return "";
     const W = 240, H = 44, P = 4;
     const t0 = hasWindow ? start : pts[0].ts;
     const t1 = hasWindow ? reset : Math.max(pts[pts.length - 1].ts, t0 + 10 * 60 * 1000);
     const x = (ts) => P + ((clamp(ts, t0, t1) - t0) / (t1 - t0)) * (W - 2 * P);
     const y = (v) => H - P - (clamp(v, 0, 100) / 100) * (H - 2 * P);
     let body = '<line class="cap" x1="' + P + '" y1="' + y(100).toFixed(1) + '" x2="' + (W - P) + '" y2="' + y(100).toFixed(1) + '"/>';
-    if (pts.length >= 2) {
-      body += '<polyline class="hist" points="' + pts.map((p) => x(p.ts).toFixed(1) + "," + y(p.v).toFixed(1)).join(" ") + '"/>';
+    if (pts.length === 1) {
+      // 관측이 하나뿐(새 창 첫 값 등) — 받은 값을 파란 점으로라도 보인다.
+      body += '<circle class="histpt" cx="' + x(pts[0].ts).toFixed(1) + '" cy="' + y(pts[0].v).toFixed(1) + '" r="1.8"/>';
+    } else if (pts.length >= 2) {
+      // 값을 계속 받은 구간은 진한 실선, 받지 못한 긴 구간(점의 gap — VS Code 꺼짐·잠자기·조회 실패 등)은 흐린 선으로 잇는다.
+      // 앞뒤가 모두 끊긴 외딴 점은 작은 점으로 보인다.
+      const xy = (p) => x(p.ts).toFixed(1) + "," + y(p.v).toFixed(1);
+      let run = [pts[0]];
+      const flush = () => {
+        if (run.length >= 2) body += '<polyline class="hist" points="' + run.map(xy).join(" ") + '"/>';
+        else body += '<circle class="histpt" cx="' + x(run[0].ts).toFixed(1) + '" cy="' + y(run[0].v).toFixed(1) + '" r="1.4"/>';
+      };
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1], b = pts[i];
+        if (b.gap) {
+          flush();
+          body += '<line class="histgap" x1="' + x(a.ts).toFixed(1) + '" y1="' + y(a.v).toFixed(1) + '" x2="' + x(b.ts).toFixed(1) + '" y2="' + y(b.v).toFixed(1) + '"/>';
+          run = [b];
+        } else {
+          run.push(b);
+        }
+      }
+      flush();
     }
     if (model) {
       const O = Number(fc.observedAtMs), U = Number(fc.usedPercent);

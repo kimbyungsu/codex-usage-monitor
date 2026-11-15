@@ -13,11 +13,13 @@
 //   다른 창의 파일은 그 주인 프로세스가 끝났고 담긴 기록이 모두 지난 창의 것일 때만 지운다(살아 있는 주인과 엇갈려
 //   새로 저장한 파일을 지우는 일이 없게).
 // - 같은 값이 이어지면 그 구간의 처음·마지막 점만 남긴다. 점이 상한을 넘으면 처음·끝을 유지하며 고르게 줄인다.
+// - 점과 따로 '새 값을 계속 받고 있던 구간'(cover — 관측 시각 범위)을 남긴다 — 점을 줄여도 VS Code 를 끈 동안·잠자기·
+//   조회 실패처럼 새 값을 받지 못한 구간만 그래프에서 흐리게 잇도록(구간 판단은 LimitWatch 와 같은 extendCover·markGaps).
 
 import { createHash } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
-import { LimitSample, LimitWindow } from "./limits";
+import { CoverSpan, DEFAULT_COVER_GAP_MS, extendCover, LimitSample, LimitWindow, markGaps } from "./limits";
 
 const FILE_PREFIX = "limit-history-";
 /** 이 기록이 지금 창의 것이라고 볼 수 있는 리셋 시각 차이(기록 안 모든 리셋 시각 기준) — 실측 흔들림 수 초보다 넉넉히. */
@@ -45,6 +47,8 @@ interface HistoryEntry {
   rMin: number;
   rMax: number;
   points: HistoryPoint[];
+  /** 새 값을 계속 받고 있던 구간. 0.10.0 기록에는 이 칸이 없다 — 읽을 때 처음~마지막 점을 한 구간으로 본다(그때까지 그리던 대로). */
+  cover: CoverSpan[];
 }
 
 interface HistoryFile {
@@ -63,8 +67,9 @@ export function historyAccountKey(agent: "claude" | "codex", identity: string | 
 /**
  * 점을 덧붙인다 — 같은 값이 세 번 이상 이어지면 가운데를 지우고 구간의 처음·마지막만 남긴다.
  * 시각이 앞서는 점은 버리고(기록은 시각순), 같은 시각은 값만 바꾼다(값 정정). 바뀌었으면 true.
+ * minPrevTs: 이보다 이른 점과는 줄이지 않는다(값을 계속 받던 구간의 시작 — 끊긴 구간 양쪽 점을 합쳐 경계를 잃지 않게).
  */
-export function appendPoint(points: HistoryPoint[], ts: number, v: number): boolean {
+export function appendPoint(points: HistoryPoint[], ts: number, v: number, minPrevTs = -Infinity): boolean {
   const last = points[points.length - 1];
   if (last && ts < last[0]) return false;
   if (last && ts === last[0]) {
@@ -73,12 +78,30 @@ export function appendPoint(points: HistoryPoint[], ts: number, v: number): bool
     return true;
   }
   const prev = points[points.length - 2];
-  if (last && prev && last[1] === v && prev[1] === v) {
+  if (last && prev && last[1] === v && prev[1] === v && prev[0] >= minPrevTs) {
     last[0] = ts;
     return true;
   }
   points.push([ts, v]);
   return true;
+}
+
+/**
+ * 점이 cap 을 넘으면 처음·끝과 mustKeep 인 점(끊긴 구간의 경계 등)을 유지하며 나머지를 고르게 줄인다.
+ * cap 은 목표 개수다 — 꼭 남길 점이 그보다 많으면 그것들은 모두 남아 cap 을 넘는다(경계를 잃는 것보다 낫다; 경계 점 수는
+ * 구간 수 상한으로 묶인다).
+ */
+export function thinKeeping<T>(points: T[], cap: number, mustKeep: (i: number) => boolean): T[] {
+  const n = points.length;
+  if (n <= cap || cap < 2) return points;
+  const keep = new Set<number>([0, n - 1]);
+  for (let i = 1; i < n - 1; i++) if (mustKeep(i)) keep.add(i);
+  const room = cap - keep.size;
+  if (room > 0) {
+    const step = (n - 1) / (room + 1);
+    for (let k = 1; k <= room; k++) keep.add(Math.round(k * step));
+  }
+  return [...keep].sort((a, b) => a - b).map((i) => points[i]);
 }
 
 /** 점이 cap 을 넘으면 처음·끝을 유지하며 고르게 줄인다. */
@@ -108,7 +131,19 @@ function toEntry(x: any): HistoryEntry | null {
     if (Array.isArray(p) && finiteNumber(p[0]) && finiteNumber(p[1])) points.push([p[0], p[1]]);
   }
   points.sort((a, b) => a[0] - b[0]);
-  return { account: x.account, id: x.id, len: x.len, R0: x.R0, rMin: x.rMin, rMax: x.rMax, points };
+  let cover: CoverSpan[] = [];
+  if (x.cover === undefined) {
+    // 0.10.0 기록(구간 칸 자체가 없음): 처음~마지막 점을 한 구간으로 — 그때까지처럼 이어 그린다.
+    if (points.length > 0) cover = [[points[0][0], points[points.length - 1][0]]];
+  } else if (Array.isArray(x.cover)) {
+    // 구간은 [시작, 끝] 두 수가 유한하고 시작 ≤ 끝인 것만(깨진 구간은 버림 — 그 사이는 흐리게 그려짐).
+    for (const c of x.cover as unknown[]) {
+      if (Array.isArray(c) && finiteNumber(c[0]) && finiteNumber(c[1]) && c[0] <= c[1]) cover.push([c[0], c[1]]);
+    }
+    cover.sort((a, b) => a[0] - b[0]);
+  }
+  // 칸은 있는데 형식이 깨졌으면(null·문자열·객체) 구간 없음 — 이어졌다고 단정하지 않는다(그 기록의 점 사이는 흐리게).
+  return { account: x.account, id: x.id, len: x.len, R0: x.R0, rMin: x.rMin, rMax: x.rMax, points, cover };
 }
 
 /** 리셋이 지난 지 하루가 넘은(더 쓸 일 없는) 기록인지. */
@@ -154,16 +189,26 @@ export class LimitHistoryStore {
    * 받아들인 관측을 기록한다. anchorOf 는 LimitWatch 가 그 관측을 배정한 창의 '처음 본 리셋 시각'(없으면 기록 안 함).
    * 계정 키가 없으면 아무것도 하지 않는다.
    */
-  record(account: string | null, windows: LimitWindow[], anchorOf: (w: LimitWindow) => number | null): void {
+  record(
+    account: string | null,
+    windows: LimitWindow[],
+    anchorOf: (w: LimitWindow) => number | null,
+    coverGapMs: number = DEFAULT_COVER_GAP_MS,
+  ): void {
     // 그래프 기록은 부가 기능 — 어떤 오류도 서버 값 반영·다음 조회 예약을 막지 않게 여기서 멈춘다(기록만 건너뜀).
     try {
-      this.recordUnsafe(account, windows, anchorOf);
+      this.recordUnsafe(account, windows, anchorOf, coverGapMs);
     } catch (error) {
       this.log?.(`사용률 기록 건너뜀: ${(error as Error).message}`);
     }
   }
 
-  private recordUnsafe(account: string | null, windows: LimitWindow[], anchorOf: (w: LimitWindow) => number | null): void {
+  private recordUnsafe(
+    account: string | null,
+    windows: LimitWindow[],
+    anchorOf: (w: LimitWindow) => number | null,
+    coverGapMs: number,
+  ): void {
     if (!account || this.disposed) return;
     this.loadOwn();
     let changed = false;
@@ -176,7 +221,7 @@ export class LimitHistoryStore {
       const len = w.windowMins ?? null;
       let e = this.own.find((x) => x.account === account && x.id === w.id && x.len === len && x.R0 === R0);
       if (!e) {
-        e = { account, id: w.id, len, R0, rMin: R, rMax: R, points: [] };
+        e = { account, id: w.id, len, R0, rMin: R, rMax: R, points: [], cover: [] };
         this.own.push(e);
       }
       if (R < e.rMin || R > e.rMax) {
@@ -184,8 +229,23 @@ export class LimitHistoryStore {
         e.rMax = Math.max(e.rMax, R);
         changed = true;
       }
-      if (appendPoint(e.points, O, v)) changed = true;
-      if (e.points.length > POINT_CAP) e.points = thinKeepEnds(e.points, Math.floor(POINT_CAP * 0.75));
+      // 새 값을 계속 받던 구간 — 구간의 시작·끝이 바뀔 때 저장 대상.
+      const before = e.cover.length ? `${e.cover.length}:${e.cover[e.cover.length - 1][1]}` : "0";
+      const forgetBefore = extendCover(e.cover, O, coverGapMs);
+      if (forgetBefore !== null) {
+        // 구간 상한으로 가장 오래된 구간을 버렸으면 그 구간의 점도 함께 버린다(점과 구간이 어긋나 앞부분이 흐려지지 않게).
+        e.points = e.points.filter((p) => p[0] >= forgetBefore);
+        changed = true;
+      }
+      if (`${e.cover.length}:${e.cover[e.cover.length - 1]?.[1]}` !== before) changed = true;
+      // 같은 값 줄이기는 지금 구간 안에서만(끊긴 구간 양쪽 점을 하나로 합치지 않음).
+      const spanStart = e.cover[e.cover.length - 1]?.[0] ?? -Infinity;
+      if (appendPoint(e.points, O, v, spanStart)) changed = true;
+      if (e.points.length > POINT_CAP) {
+        const ends = new Set(e.cover.flatMap((c) => [c[0], c[1]]));
+        const pts = e.points;
+        e.points = thinKeeping(pts, Math.floor(POINT_CAP * 0.75), (i) => ends.has(pts[i][0]));
+      }
     }
     if (changed) {
       this.dirty = true;
@@ -200,18 +260,30 @@ export class LimitHistoryStore {
    * (2)는 리셋 시각이 경계 근처에서 오가 같은 리셋 값이 서로 다른 창에 배정됐을 수 있는 경우를 보수적으로 뺀다.
    */
   pointsFor(account: string | null, w: LimitWindow, fromMs: number, toMs: number): LimitSample[] {
-    // 저장 기록을 못 읽으면 지금 기억하는 값만 그린다 — 어떤 오류도 서버 값 반영·다음 조회 예약을 막지 않게.
+    return this.chartDataFor(account, w, fromMs, toMs).points;
+  }
+
+  /**
+   * 그래프용: pointsFor 와 같은 기록에서 점과 '값을 계속 받던 구간'을 함께 준다(구간은 범위로 자르지 않는다 — 점 사이 판단용).
+   * 저장 기록을 못 읽으면 빈 결과 — 지금 기억하는 값만 그린다(어떤 오류도 서버 값 반영·다음 조회 예약을 막지 않게).
+   */
+  chartDataFor(account: string | null, w: LimitWindow, fromMs: number, toMs: number): { points: LimitSample[]; cover: CoverSpan[] } {
     try {
-      return this.pointsForUnsafe(account, w, fromMs, toMs);
+      return this.chartDataForUnsafe(account, w, fromMs, toMs);
     } catch (error) {
       this.log?.(`사용률 기록 읽기 건너뜀: ${(error as Error).message}`);
-      return [];
+      return { points: [], cover: [] };
     }
   }
 
-  private pointsForUnsafe(account: string | null, w: LimitWindow, fromMs: number, toMs: number): LimitSample[] {
+  private chartDataForUnsafe(
+    account: string | null,
+    w: LimitWindow,
+    fromMs: number,
+    toMs: number,
+  ): { points: LimitSample[]; cover: CoverSpan[] } {
     const R = Number(w.resetsAtMs);
-    if (!account || !(R > 0)) return [];
+    if (!account || !(R > 0)) return { points: [], cover: [] };
     this.loadOwn();
     const len = w.windowMins ?? null;
     const all: HistoryEntry[] = [];
@@ -222,14 +294,16 @@ export class LimitHistoryStore {
     const gap = (a: HistoryEntry, b: HistoryEntry) => Math.max(0, a.rMin - b.rMax, b.rMin - a.rMax);
     const others = all.filter((e) => !near(e));
     const out: LimitSample[] = [];
+    const cover: CoverSpan[] = [];
     for (const e of all) {
       if (!near(e)) continue;
       if (others.some((f) => gap(e, f) <= AMBIGUOUS_RESET_MS)) continue; // 어느 창인지 모호
       for (const [ts, v] of e.points) {
         if (ts >= fromMs && ts <= toMs && isFinite(v)) out.push({ ts, v });
       }
+      for (const c of e.cover) cover.push([c[0], c[1]]);
     }
-    return out;
+    return { points: out, cover };
   }
 
   /** 남은 기록을 바로 저장한다(실패하면 미저장으로 남겨 다음에 다시 시도). */
@@ -357,6 +431,11 @@ export class LimitHistoryStore {
  * (확장이 지금 기억하는 값을 마지막에 넘겨 정정이 반영되게), 같은 값 구간은 처음·마지막만, 너무 많으면 처음·끝을 유지하며 줄인다.
  */
 export function mergeChartSamples(sources: LimitSample[][], fromMs: number, toMs: number, cap = CHART_CAP): LimitSample[] {
+  return thinKeepEnds(mergedPoints(sources, fromMs, toMs), cap).map(([ts, v]) => ({ ts, v }));
+}
+
+/** 여러 출처의 점을 [fromMs, toMs] 안만 시각순으로 합친다(같은 시각은 뒤 출처 우선, 같은 값 구간은 처음·마지막만) — 상한 적용 전. */
+function mergedPoints(sources: LimitSample[][], fromMs: number, toMs: number): HistoryPoint[] {
   const byTs = new Map<number, number>();
   for (const src of sources) {
     for (const p of src) {
@@ -365,5 +444,37 @@ export function mergeChartSamples(sources: LimitSample[][], fromMs: number, toMs
   }
   const points: HistoryPoint[] = [];
   for (const ts of [...byTs.keys()].sort((a, b) => a - b)) appendPoint(points, ts, byTs.get(ts) as number);
-  return thinKeepEnds(points, cap).map(([ts, v]) => ({ ts, v }));
+  return points;
+}
+
+/**
+ * 그래프의 파란 실선 점: 여러 출처를 합치고, 점마다 '앞 점에서 여기까지 값을 계속 받았는지'(gap)를 붙인 뒤 줄인다.
+ * 같은 값 줄이기는 계속 받던 구간 안에서만, 개수 상한으로 솎을 때도 끊긴 구간의 양쪽 경계 점은 남긴다 — 그래서 흐린 구간이
+ * 실제로 값을 받은 시간까지 덮지 않는다.
+ */
+export function chartSeries(
+  sources: LimitSample[][],
+  covers: CoverSpan[][],
+  fromMs: number,
+  toMs: number,
+  gapMs: number = DEFAULT_COVER_GAP_MS,
+  cap = CHART_CAP,
+): LimitSample[] {
+  const byTs = new Map<number, number>();
+  for (const src of sources) {
+    for (const p of src) {
+      if (isFinite(p.ts) && isFinite(p.v) && p.ts >= fromMs && p.ts <= toMs) byTs.set(p.ts, p.v);
+    }
+  }
+  const raw: LimitSample[] = [...byTs.keys()].sort((a, b) => a - b).map((ts) => ({ ts, v: byTs.get(ts) as number }));
+  const marked = markGaps(raw, covers, gapMs);
+  const out: LimitSample[] = [];
+  for (const p of marked) {
+    const last = out[out.length - 1];
+    const prev = out[out.length - 2];
+    // 가운데 점은 앞뒤가 모두 이어진(같은 구간) 같은 값일 때만 지운다 — 그러면 남는 두 점 사이도 같은 구간이라 이어진 것.
+    if (last && prev && last.v === p.v && prev.v === p.v && !last.gap && !p.gap) out[out.length - 1] = p;
+    else out.push(p);
+  }
+  return thinKeeping(out, cap, (i) => Boolean(out[i].gap) || Boolean(out[i + 1]?.gap));
 }

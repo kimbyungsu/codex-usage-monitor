@@ -20,8 +20,18 @@ import {
 } from "./claudeApi";
 import { ClaudeCacheStats, ClaudeState, ClaudeThreadUsage, ClaudeTokenUsage, TokenBucket } from "./claudeTypes";
 import { computeInsights, InsightEntry } from "./insights";
-import { historyAccountKey, LimitHistoryStore, mergeChartSamples } from "./limitHistory";
-import { acceptObservations, LimitSample, LimitWatch, LimitWindow, windowStartOf } from "./limits";
+import { chartSeries, historyAccountKey, LimitHistoryStore } from "./limitHistory";
+import {
+  acceptObservations,
+  chartUpTo,
+  CoverSpan,
+  coverGapFor,
+  LimitSample,
+  LimitWatch,
+  LimitWindow,
+  markGaps,
+  windowStartOf,
+} from "./limits";
 import { formatWhen, limitLabel, t } from "./i18n";
 
 // 모델별 100만 토큰당 단가(USD). 구독 사용자는 실제 청구가 아니라 'API 환산 비용'.
@@ -355,18 +365,23 @@ export class ClaudeService implements vscode.Disposable {
       const staleAfterMs = Math.max(2 * this.planBaseMs, 5 * 60_000);
       const windows = acceptObservations(this.watch, plan?.windows, result.usage.windows, staleAfterMs);
       plan = { ...result.usage, windows };
-      this.watch.observe(windows);
+      this.watch.observe(windows, this.coverGapMs());
       // 계정 식별을 확인할 수 있을 때만, 이번 응답에서 새로 받아들인 관측만 그 계정 기록으로 저장한다
       // (없으면 저장하지 않음 · 받아들이지 않고 이어 둔 이전 표시값은 저장하지 않음 — 다른 계정과 섞이지 않게).
       const fresh = new Set(result.usage.windows.map((x) => `${x.id}\u0000${x.observedAtMs}`));
       const accepted = windows.filter((x) => fresh.has(`${x.id}\u0000${x.observedAtMs}`));
-      this.history?.record(historyAccountKey("claude", account.identity), accepted, (w) => this.watch.anchorFor(w));
+      this.history?.record(
+        historyAccountKey("claude", account.identity),
+        accepted,
+        (w) => this.watch.anchorFor(w),
+        this.coverGapMs(),
+      );
       this.checkAlerts(windows);
     }
     // 계정별 정보(구독 유형·등급·표시명)는 이 응답이 지금 상태의 주인 것일 때만 응답 값으로 바꾼다
     // (식별 확인 또는 새 주인으로 처리). 누구 것인지 알 수 없는 응답은 지금 주인의 정보를 덮지 않는다.
     const ownerSpeaks = !unattributed;
-    const tracked = plan ? this.watch.snapshot(plan.windows) : { holds: {}, holdReasons: {}, samples: {} };
+    const tracked = plan ? this.watch.snapshot(plan.windows) : { holds: {}, holdReasons: {}, samples: {}, covers: {} };
     // 계정이 바뀌었으면 요금제 표시명·구독 유형·등급·마지막 확인 시각도 이전 계정 것을 이어 쓰지 않는다.
     const previous: Partial<ClaudeState> = accountChanged ? {} : this.state;
     const lastPlanRefresh = result.usage && !unattributed ? Date.now() : previous.lastPlanRefresh;
@@ -382,7 +397,7 @@ export class ClaudeService implements vscode.Disposable {
       samples: unattributed
         ? this.state.samples
         : plan
-          ? this.chartSamples(plan.windows, tracked.samples, account.identity)
+          ? this.chartSamples(plan.windows, tracked, account.identity)
           : tracked.samples,
       planFailing: !result.usage,
       // 누구 것인지 모르는 응답이 같은 로그인 구간임도 확인되지 않으면(토큰이 바뀜·자격 증명이 생기거나 사라짐) 표시 중인 정보
@@ -462,25 +477,37 @@ export class ClaudeService implements vscode.Disposable {
 
   /**
    * 그래프의 파란 실선: 지금 기억하는 값 + 저장된 값(다시 켜기 전 포함·모든 창) — 모두 서버가 알려 준 실제 값이고,
-   * 이 창(LimitWatch 가 정한 같은 창)의 시작부터 지금까지만. identity 는 이번 조회로 확인한 지금 계정 — 없으면 지금 기억하는 값만.
+   * 이 창(LimitWatch 가 정한 같은 창)의 시작부터 받은 마지막 값까지만(chartUpTo — 서버가 붙인 관측 시각이 PC 시계보다 조금
+   * 앞서도 빠지지 않게). identity 는 이번 조회로 확인한 지금 계정 — 없으면 지금 기억하는 값만.
+   * 점마다 '앞 점에서 여기까지 값을 계속 받았는지'를 붙인다(markGaps) — 받지 못한 긴 구간만 그래프가 흐리게 잇는다.
    */
   private chartSamples(
     windows: LimitWindow[],
-    tracked: Record<string, LimitSample[]>,
+    tracked: { samples: Record<string, LimitSample[]>; covers: Record<string, CoverSpan[]> },
     identity: string | null,
   ): Record<string, LimitSample[]> {
     const out: Record<string, LimitSample[]> = {};
     const key = historyAccountKey("claude", identity);
     const now = Date.now();
+    const gapMs = this.coverGapMs();
     for (const w of windows) {
-      const live = tracked[w.id] ?? [];
+      const live = tracked.samples[w.id] ?? [];
+      const liveCover = tracked.covers[w.id] ?? [];
       const S = windowStartOf(w);
-      out[w.id] =
-        S === null || !key
-          ? live
-          : mergeChartSamples([this.history?.pointsFor(key, w, S, now) ?? [], live], S, now);
+      if (S === null || !key) {
+        out[w.id] = markGaps(live, [liveCover], gapMs);
+        continue;
+      }
+      const upTo = chartUpTo(w, now);
+      const stored = this.history?.chartDataFor(key, w, S, upTo) ?? { points: [], cover: [] };
+      out[w.id] = chartSeries([stored.points, live], [stored.cover, liveCover], S, upTo, gapMs);
     }
     return out;
+  }
+
+  /** 이보다 오래 응답이 없었으면 그래프에서 '값을 받지 못한 구간'(30분과 평소 조회 간격의 3배 중 긴 쪽). */
+  private coverGapMs(): number {
+    return coverGapFor(this.planBaseMs);
   }
 
   /** 서버가 보고한 창마다 임계치 알림(적용되지 않는 창은 목록에 없으므로 자연히 제외). */

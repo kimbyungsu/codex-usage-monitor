@@ -98,6 +98,8 @@ svg.chart rect.seg:hover { opacity: 0.78; }
 /* 한도 스파크라인 */
 svg.spark { display: block; width: 100%; height: 44px; margin-top: 8px; }
 svg.spark polyline.hist { fill: none; stroke: var(--accent); stroke-width: 1.6; }
+svg.spark line.histgap { stroke: var(--accent); stroke-width: 1.2; opacity: 0.35; }
+svg.spark circle.histpt { fill: var(--accent); }
 svg.spark line.proj { stroke: var(--warn); stroke-width: 1.2; stroke-dasharray: 3 3; }
 svg.spark line.cap { stroke: var(--danger); stroke-width: 1; stroke-dasharray: 1 3; opacity: 0.6; }
 svg.spark circle.projdot { fill: var(--danger); }

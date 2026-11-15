@@ -313,6 +313,88 @@ export function forecastWindow(
 export interface LimitSample {
   ts: number;
   v: number;
+  /** 앞 점에서 이 점까지 값을 계속 받지 못했음(VS Code 꺼짐·잠자기·조회 실패 등) — 그래프가 이 구간만 흐리게 잇는다. */
+  gap?: boolean;
+}
+
+/**
+ * 새 값을 계속 받고 있던 구간 [시작 관측 시각, 끝 관측 시각]. 그래프 가로축·소진 예상과 같은 관측 시각 하나로만 판단한다:
+ * 받아들인 새 관측의 관측 시각이 앞 관측과 기준 시간 안이면 같은 구간, 더 벌어지면 새 구간. 구간 안의 점 사이는 실제 관측으로
+ * 이어진 것이고, 두 구간 사이는 그동안의 흐름을 모른다(VS Code 꺼짐·잠자기·조회 실패, 또는 서버가 옛 관측 시각만 되풀이함).
+ */
+export type CoverSpan = [number, number];
+
+/** 새 값의 관측 시각 사이가 이보다 벌어지면 '값을 받지 못한 구간'으로 본다(기본 — 평소 조회 간격이 길면 그 3배). */
+export const DEFAULT_COVER_GAP_MS = 30 * 60_000;
+/**
+ * 한 창의 구간 개수 상한. 구간 사이는 기준 시간(최소 30분)보다 벌어져야 나뉘므로 30일 창도 1441개를 넘지 않는다 —
+ * 이보다 긴 비정상적인 창에서만 닿는다. 닿으면 가장 오래된 구간과 그 구간의 점을 함께 버린다(점은 남기고 구간만 버리면
+ * 실제로 받은 앞부분이 흐리게 그려진다).
+ */
+export const COVER_CAP = 2000;
+
+/** 서비스의 평소 조회 간격에 맞춘 '끊김' 기준: 30분과 조회 간격의 3배 중 긴 쪽. */
+export function coverGapFor(baseIntervalMs: number): number {
+  return Math.max(DEFAULT_COVER_GAP_MS, isFinite(baseIntervalMs) ? 3 * baseIntervalMs : 0);
+}
+
+/**
+ * 받아들인 관측 하나(관측 시각 O)를 구간 목록에 반영한다(목록을 직접 바꾼다). 마지막 구간 끝과 gapMs 안이면 그 구간을
+ * 늘리고, 더 벌어지면 새 구간을 연다. 이미 덮인 관측 시각(되풀이·옛 관측)은 아무것도 바꾸지 않는다.
+ * 구간 상한(COVER_CAP)을 넘어 오래된 구간을 버렸으면 남은 첫 구간의 시작 시각을 돌려준다 — 부른 쪽은 그보다 이른 점을
+ * 함께 버려 점과 구간을 맞춘다. 그 밖에는 null.
+ */
+export function extendCover(cover: CoverSpan[], O: number, gapMs: number): number | null {
+  if (!isFinite(O)) return null;
+  const last = cover[cover.length - 1];
+  if (last && O <= last[1]) return null; // 이미 덮인 관측 시각 — 새 값이 아니다
+  if (last && O - last[1] <= gapMs) {
+    last[1] = O;
+    return null;
+  }
+  cover.push([O, O]);
+  if (cover.length > COVER_CAP) {
+    cover.splice(0, cover.length - COVER_CAP);
+    return cover[0][0];
+  }
+  return null;
+}
+
+/**
+ * 그래프 점마다 '앞 점에서 여기까지 값을 계속 받았는지'를 붙인다. 여러 출처(다른 VS Code 창 기록·지금 기억)의 구간을 합치고
+ * (사이가 gapMs 이내면 이어진 것으로), 두 점이 합친 구간 하나에 함께 들어 있으면 이어진 것, 아니면 gap.
+ * 점을 줄이거나 솎아도(같은 값 구간 압축·개수 상한) 구간은 그대로라 잘못 끊기지 않는다.
+ */
+export function markGaps(samples: LimitSample[], covers: CoverSpan[][], gapMs: number): LimitSample[] {
+  const spans = covers
+    .flat()
+    .filter((s) => Array.isArray(s) && isFinite(s[0]) && isFinite(s[1]) && s[0] <= s[1])
+    .map((s) => [s[0], s[1]] as [number, number])
+    .sort((a, b) => a[0] - b[0]);
+  const merged: [number, number][] = [];
+  for (const s of spans) {
+    const cur = merged[merged.length - 1];
+    if (cur && s[0] <= cur[1] + gapMs) cur[1] = Math.max(cur[1], s[1]);
+    else merged.push([s[0], s[1]]);
+  }
+  const inOne = (a: number, b: number) => merged.some((m) => m[0] <= a && b <= m[1]);
+  return samples.map((p, i) => {
+    const out: LimitSample = { ts: p.ts, v: p.v };
+    if (i > 0 && !inOne(samples[i - 1].ts, p.ts)) out.gap = true;
+    return out;
+  });
+}
+
+/**
+ * 그래프에 넣을 점의 마지막 시각: '지금'과 이 창에서 받아들인 최신 관측 시각 중 늦은 쪽(서버가 붙인 관측 시각이 PC 시계보다
+ * 조금 앞서도 방금 받은 값이 빠지지 않게), 단 리셋 시각을 넘지 않는다. 그래프 전용 — 예상 계산 입력은 바꾸지 않는다.
+ */
+export function chartUpTo(w: LimitWindow, now: number): number {
+  const O = Number(w.observedAtMs);
+  let upTo = isFinite(O) ? Math.max(now, O) : now;
+  const R = Number(w.resetsAtMs);
+  if (isFinite(R) && R > 0) upTo = Math.min(upTo, R);
+  return upTo;
 }
 
 interface WindowIdentity {
@@ -323,6 +405,8 @@ interface WindowIdentity {
   held: boolean;
   lastSeen: number;
   samples: LimitSample[];
+  /** 이 창에서 새 값을 계속 받고 있던 구간(그래프 흐린 구간 판단). */
+  cover: CoverSpan[];
 }
 
 const IDENTITY_TOLERANCE_MS = 2 * 60_000; // 관측된 리셋 시각 흔들림(대부분 ≤5초)을 같은 창으로
@@ -380,8 +464,11 @@ export class LimitWatch {
     this.staleMemo.set(id, memo);
   }
 
-  /** 전체 스냅샷의 관측을 반영한다(부분 입력을 넣어도 다른 창 기록을 지우지 않는다). */
-  observe(windows: LimitWindow[]): void {
+  /**
+   * 전체 스냅샷의 관측을 반영한다(부분 입력을 넣어도 다른 창 기록을 지우지 않는다).
+   * coverGapMs: 새 값의 관측 시각 사이가 이보다 벌어지면 그래프에서 '값을 받지 못한 구간'.
+   */
+  observe(windows: LimitWindow[], coverGapMs: number = DEFAULT_COVER_GAP_MS): void {
     for (const w of windows) {
       const O = Number(w.observedAtMs);
       if (!isFinite(O) || O <= 0) continue;
@@ -398,6 +485,7 @@ export class LimitWatch {
         held: false,
         lastSeen: O,
         samples: [],
+        cover: [],
       };
       // 어느 기준에서 보든 같은 창 안 하락이면 보류.
       const dropped = hits.some((i) => w.usedPercent < i.maxU - DROP_TOLERANCE);
@@ -411,11 +499,15 @@ export class LimitWatch {
         last.v = w.usedPercent; // 같은 관측 시각의 정정은 그 샘플을 바꾼다(카드와 그래프 일치)
       } else if (!last || O > last.ts) {
         idn.samples.push({ ts: O, v: w.usedPercent });
-        if (idn.samples.length > SAMPLE_CAP) {
-          const keepTail = SAMPLE_CAP / 2;
-          const head = idn.samples.slice(0, -keepTail).filter((_, i) => i % 2 === 0);
-          idn.samples = head.concat(idn.samples.slice(-keepTail));
-        }
+      }
+      const forgetBefore = extendCover(idn.cover, O, coverGapMs);
+      if (forgetBefore !== null) idn.samples = idn.samples.filter((p) => p.ts >= forgetBefore);
+      if (idn.samples.length > SAMPLE_CAP) {
+        // 앞쪽을 절반으로 솎되, 값을 계속 받던 구간의 시작·끝 점은 남긴다(그래프의 흐린 구간이 받은 시간까지 덮지 않게).
+        const keepTail = SAMPLE_CAP / 2;
+        const ends = new Set(idn.cover.flatMap((c) => [c[0], c[1]]));
+        const head = idn.samples.slice(0, -keepTail).filter((p, i) => i % 2 === 0 || ends.has(p.ts));
+        idn.samples = head.concat(idn.samples.slice(-keepTail));
       }
       // 리셋이 지난 기록은 버린다. 리셋 전 기록 중 보류이거나 0%보다 컸던 적이 있는 기록은 유지, 0%뿐인 기록만 최근 몇 개.
       const others = (this.byId.get(w.id) ?? []).filter((i) => i !== idn && i.R0 + IDENTITY_TOLERANCE_MS >= O);
@@ -467,22 +559,31 @@ export class LimitWatch {
     return idn ? [...idn.samples] : [];
   }
 
-  /** 창 목록 전체에 대한 보류 여부·샘플(상태로 내보낼 때). */
+  /** 이 관측이 속한 창(현재 기준)에서 값을 계속 받고 있던 구간(복사본). */
+  coverFor(w: LimitWindow): CoverSpan[] {
+    const idn = this.matches(w)[0];
+    return idn ? idn.cover.map((s) => [s[0], s[1]] as CoverSpan) : [];
+  }
+
+  /** 창 목록 전체에 대한 보류 여부·샘플·계속 받던 구간(상태로 내보낼 때). */
   snapshot(windows: LimitWindow[]): {
     holds: Record<string, boolean>;
     holdReasons: Record<string, HoldReason>;
     samples: Record<string, LimitSample[]>;
+    covers: Record<string, CoverSpan[]>;
   } {
     const holds: Record<string, boolean> = {};
     const holdReasons: Record<string, HoldReason> = {};
     const samples: Record<string, LimitSample[]> = {};
+    const covers: Record<string, CoverSpan[]> = {};
     for (const w of windows) {
       const reason = this.holdReason(w);
       holds[w.id] = reason !== null;
       if (reason) holdReasons[w.id] = reason;
       samples[w.id] = this.samplesFor(w);
+      covers[w.id] = this.coverFor(w);
     }
-    return { holds, holdReasons, samples };
+    return { holds, holdReasons, samples, covers };
   }
 
   /** 실제 계정이 바뀌었을 때만. */

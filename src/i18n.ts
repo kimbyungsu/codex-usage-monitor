@@ -473,7 +473,7 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     heatMore: "많음",
     weekdaysShort: "월,화,수,목,금,토,일",
     // 한도 스파크라인
-    sparkNote: "창 시작 → 리셋 · 실선 = 관측한 사용률 · 점선 = 창 시작 이후 평균이 유지될 때",
+    sparkNote: "창 시작 → 리셋 · 실선 = 관측한 사용률(흐린 구간 = 값을 받지 못한 동안) · 점선 = 창 시작 이후 평균이 유지될 때",
   };
 
   const en: Record<string, string> = {
@@ -631,7 +631,7 @@ export function webviewStrings(lang: Lang): Record<string, string> {
     heatMore: "More",
     weekdaysShort: "Mon,Tue,Wed,Thu,Fri,Sat,Sun",
     // Limit sparkline
-    sparkNote: "Window start → reset · solid = observed usage · dashed = if the average since the window started holds",
+    sparkNote: "Window start → reset · solid = observed usage (faint = no values received meanwhile) · dashed = if the average since the window started holds",
   };
 
   return lang === "ko" ? ko : en;

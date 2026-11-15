@@ -5,8 +5,19 @@ import { promisify } from "util";
 import * as vscode from "vscode";
 import { readCodexHistoryAsync } from "./codexHistory";
 import { CodexRpcClient } from "./codexClient";
-import { historyAccountKey, LimitHistoryStore, mergeChartSamples } from "./limitHistory";
-import { acceptObservations, LimitSample, LimitWatch, LimitWindow, windowsFromCodex, windowStartOf } from "./limits";
+import { chartSeries, historyAccountKey, LimitHistoryStore } from "./limitHistory";
+import {
+  acceptObservations,
+  chartUpTo,
+  CoverSpan,
+  coverGapFor,
+  LimitSample,
+  LimitWatch,
+  LimitWindow,
+  markGaps,
+  windowsFromCodex,
+  windowStartOf,
+} from "./limits";
 import {
   AccountReadResponse,
   CodexAccount,
@@ -236,11 +247,11 @@ export class UsageService implements vscode.Disposable {
       // 같은 창 기준에서 더 새 관측을 이미 봤으면 이전 표시 유지, 새로 받은 관측에만 노후 시각(관측 때 고정)을 붙인다.
       const staleAfterMs = Math.max(2 * this.serverBaseMs, 5 * 60_000);
       const windows = acceptObservations(this.watch, accountChanged ? undefined : this.state.limits, received, staleAfterMs);
-      this.watch.observe(windows);
+      this.watch.observe(windows, this.coverGapMs());
       // 이번 응답에서 새로 받아들인 관측만 이 계정 기록으로 저장한다(이어 둔 이전 표시값은 저장하지 않음).
       const fresh = new Set(received.map((x) => `${x.id}\u0000${x.observedAtMs}`));
       const accepted = windows.filter((x) => fresh.has(`${x.id}\u0000${x.observedAtMs}`));
-      this.history?.record(historyAccountKey("codex", identity), accepted, (w) => this.watch.anchorFor(w));
+      this.history?.record(historyAccountKey("codex", identity), accepted, (w) => this.watch.anchorFor(w), this.coverGapMs());
       const tracked = this.watch.snapshot(windows);
       this.setState({
         account: account.account,
@@ -251,7 +262,7 @@ export class UsageService implements vscode.Disposable {
         limits: windows,
         holds: tracked.holds,
         holdReasons: tracked.holdReasons,
-        samples: this.chartSamples(windows, tracked.samples, identity),
+        samples: this.chartSamples(windows, tracked, identity),
         serverFailing: false,
         accountChecking: false,
         lastRefresh: limits.at,
@@ -302,26 +313,37 @@ export class UsageService implements vscode.Disposable {
 
   /**
    * 그래프의 파란 실선: 지금 기억하는 값 + 저장된 값(다시 켜기 전 포함·모든 창) — 모두 서버가 알려 준 실제 값이고,
-   * 이 창(LimitWatch 가 정한 같은 창)의 시작부터 지금까지만. identity 는 이번 서버 조회로 확인한 지금 계정 —
-   * 없으면 지금 기억하는 값만.
+   * 이 창(LimitWatch 가 정한 같은 창)의 시작부터 받은 마지막 값까지만(chartUpTo — 서버가 붙인 관측 시각이 PC 시계보다 조금
+   * 앞서도 빠지지 않게). identity 는 이번 조회로 확인한 지금 계정 — 없으면 지금 기억하는 값만.
+   * 점마다 '앞 점에서 여기까지 값을 계속 받았는지'를 붙인다(markGaps) — 받지 못한 긴 구간만 그래프가 흐리게 잇는다.
    */
   private chartSamples(
     windows: LimitWindow[],
-    tracked: Record<string, LimitSample[]>,
+    tracked: { samples: Record<string, LimitSample[]>; covers: Record<string, CoverSpan[]> },
     identity: string | null,
   ): Record<string, LimitSample[]> {
     const out: Record<string, LimitSample[]> = {};
     const key = historyAccountKey("codex", identity);
     const now = Date.now();
+    const gapMs = this.coverGapMs();
     for (const w of windows) {
-      const live = tracked[w.id] ?? [];
+      const live = tracked.samples[w.id] ?? [];
+      const liveCover = tracked.covers[w.id] ?? [];
       const S = windowStartOf(w);
-      out[w.id] =
-        S === null || !key
-          ? live
-          : mergeChartSamples([this.history?.pointsFor(key, w, S, now) ?? [], live], S, now);
+      if (S === null || !key) {
+        out[w.id] = markGaps(live, [liveCover], gapMs);
+        continue;
+      }
+      const upTo = chartUpTo(w, now);
+      const stored = this.history?.chartDataFor(key, w, S, upTo) ?? { points: [], cover: [] };
+      out[w.id] = chartSeries([stored.points, live], [stored.cover, liveCover], S, upTo, gapMs);
     }
     return out;
+  }
+
+  /** 이보다 오래 응답이 없었으면 그래프에서 '값을 받지 못한 구간'(30분과 평소 조회 간격의 3배 중 긴 쪽). */
+  private coverGapMs(): number {
+    return coverGapFor(this.serverBaseMs);
   }
 
   private noteServerFailure(error: Error): void {
